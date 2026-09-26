@@ -61,10 +61,11 @@
         </div>
 
         <div class="quick-select-group">
-          <label for="engineSelect">对弈：</label>
+          <label for="engineSelect">模式：</label>
           <select id="engineSelect" class="form-select-sm">
-            <option value="local" selected>本地智能算法</option>
-            <option value="llm">大模型对战</option>
+            <option value="local" selected>本地算法 (人机)</option>
+            <option value="llm">大模型 (人机)</option>
+            <option value="pvp">双人同屏 (人人)</option>
           </select>
         </div>
 
@@ -196,15 +197,18 @@
           </div>
         </div>
 
-        <!-- 对战引擎选择 -->
+        <!-- 对战模式选择 -->
         <div class="form-group">
-          <label class="form-label">AI 对弈引擎：</label>
+          <label class="form-label">对弈模式：</label>
           <div class="radio-group">
             <label class="radio-label">
-              <input type="radio" name="cfgAiEngine" value="local"> 本地智能算法 (零延迟、免Key、离线可用)
+              <input type="radio" name="cfgAiEngine" value="local"> 本地智能算法 (人机对弈，零延迟免Key)
             </label>
             <label class="radio-label">
-              <input type="radio" name="cfgAiEngine" value="llm"> 大模型 API (DeepSeek/Gemini/OpenAI/千问等)
+              <input type="radio" name="cfgAiEngine" value="llm"> 大模型 API (人机对弈，DeepSeek/Gemini等)
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="cfgAiEngine" value="pvp"> 双人同屏对弈 (人人对弈，家人朋友轮流落子)
             </label>
           </div>
         </div>

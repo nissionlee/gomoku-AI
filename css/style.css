@@ -119,6 +119,12 @@ body {
   border: 1px solid rgba(22, 119, 255, 0.3);
 }
 
+.badge-pvp {
+  background: rgba(250, 140, 22, 0.18);
+  color: #ffa940;
+  border: 1px solid rgba(250, 140, 22, 0.35);
+}
+
 .nav-quick-controls {
   display: flex;
   align-items: center;

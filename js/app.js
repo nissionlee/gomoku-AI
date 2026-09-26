@@ -108,7 +108,11 @@ class GomokuApp {
       this.settings.aiEngine = e.target.value;
       StorageManager.saveSettings(this.settings);
       this.updateEngineBadge();
-      this.showToast(`已切换为：${e.target.value === 'llm' ? '大模型对弈模式' : '本地算法模式'}`);
+      const label = e.target.value === 'pvp'
+        ? '双人同屏对弈 (人人模式)'
+        : (e.target.value === 'llm' ? '大模型对弈模式' : '本地算法模式');
+      this.showToast(`已切换为：${label}`);
+      this.startNewGame();
     });
 
     // 静音切换
@@ -230,6 +234,38 @@ class GomokuApp {
   }
 
   /**
+   * 判断是否为双人同屏 (人人对弈) 模式
+   */
+  isPvP() {
+    return this.settings.aiEngine === 'pvp';
+  }
+
+  /**
+   * 更新侧边栏 AI 卡片与对话人设信息
+   */
+  updateSideCard() {
+    const titleEl = document.getElementById('aiCardTitle');
+    const tagEl = document.querySelector('.ai-tag');
+    const avatarEl = document.querySelector('.ai-avatar');
+
+    if (this.isPvP()) {
+      if (titleEl) titleEl.textContent = '双人对弈';
+      if (tagEl) tagEl.textContent = '同屏轮流博弈';
+      if (avatarEl) avatarEl.textContent = '👥';
+      this.aiSpeechTextEl.textContent = '双人对弈已开启！黑方先行，双方轮流在同一屏幕落子，预祝棋逢对手！';
+    } else {
+      if (titleEl) titleEl.textContent = 'AI 棋客';
+      if (tagEl) tagEl.textContent = '博弈对手';
+      if (avatarEl) avatarEl.textContent = '🤖';
+      const isLLM = this.settings.aiEngine === 'llm';
+      const persona = AI_PERSONAS[this.settings.llmConfig.persona] || AI_PERSONAS.humorous;
+      this.aiSpeechTextEl.textContent = isLLM
+        ? `【${persona.name}】棋局已开，请阁下落子！`
+        : '棋逢对手，请赐教！';
+    }
+  }
+
+  /**
    * 开始新对局
    */
   startNewGame() {
@@ -238,10 +274,15 @@ class GomokuApp {
     this.winner = null;
     this.winningLine = null;
     this.gameStatus = 'playing';
-    this.turn = BLACK; // 黑先
+    this.turn = BLACK; // 黑方先手
 
-    this.playerColor = Number(this.settings.playerColor) || BLACK;
-    this.aiColor = this.playerColor === BLACK ? WHITE : BLACK;
+    if (this.isPvP()) {
+      this.playerColor = BLACK;
+      this.aiColor = null;
+    } else {
+      this.playerColor = Number(this.settings.playerColor) || BLACK;
+      this.aiColor = this.playerColor === BLACK ? WHITE : BLACK;
+    }
 
     // 重置计时器
     this.resetTimer();
@@ -252,17 +293,12 @@ class GomokuApp {
     this.goban.setTurn(this.turn);
     this.goban.setLocked(false);
 
-    // 重置对话泡
-    const isLLM = this.settings.aiEngine === 'llm';
-    const persona = AI_PERSONAS[this.settings.llmConfig.persona] || AI_PERSONAS.humorous;
-    this.aiSpeechTextEl.textContent = isLLM
-      ? `【${persona.name}】棋局已开，请阁下落子！`
-      : '棋逢对手，请赐教！';
-
+    // 重置侧边栏卡片与对话
+    this.updateSideCard();
     this.updateStatus();
 
-    // 若玩家执白(后手)，AI执黑先走第一步
-    if (this.playerColor === WHITE) {
+    // 若人机模式且玩家执白(后手)，AI先走第一步
+    if (!this.isPvP() && this.playerColor === WHITE) {
       this.triggerAIMove(true);
     }
   }
@@ -273,36 +309,71 @@ class GomokuApp {
   handlePlayerClick(r, c) {
     if (!this.isUnlocked()) return;
     if (this.gameStatus !== 'playing') return;
-    if (this.turn !== this.playerColor) return;
     if (this.board[r][c] !== EMPTY) return;
 
-    // 检查先手三三禁手限制
-    if (this.playerColor === BLACK && this.settings.checkDoubleThree) {
-      const forbidden = checkForbidden(this.board, r, c, {
-        checkDoubleThree: true,
-        checkDoubleFour: false,
-        checkOverline: true
-      });
+    if (this.isPvP()) {
+      // ===== 双人同屏 (人人对弈) =====
+      const currentColor = this.turn;
 
-      if (forbidden.isForbidden) {
-        sound.playWarning();
-        this.showToast(`⚠️ ${forbidden.reason || '先手三三禁手，此步违规不可落子！'}`);
+      // 检查先手黑棋三三禁手
+      if (currentColor === BLACK && this.settings.checkDoubleThree) {
+        const forbidden = checkForbidden(this.board, r, c, {
+          checkDoubleThree: true,
+          checkDoubleFour: false,
+          checkOverline: true
+        });
+
+        if (forbidden.isForbidden) {
+          sound.playWarning();
+          this.showToast(`⚠️ ${forbidden.reason || '先手三三禁手，此步违规不可落子！'}`);
+          return;
+        }
+      }
+
+      // 成功落子
+      this.executeMove(r, c, currentColor);
+
+      // 胜负检测
+      if (this.checkGameEnd(r, c, currentColor)) {
         return;
       }
+
+      // 切换到对方回合
+      this.turn = currentColor === BLACK ? WHITE : BLACK;
+      this.updateStatus();
+
+    } else {
+      // ===== 人机对弈模式 =====
+      if (this.turn !== this.playerColor) return;
+
+      // 检查先手三三禁手限制
+      if (this.playerColor === BLACK && this.settings.checkDoubleThree) {
+        const forbidden = checkForbidden(this.board, r, c, {
+          checkDoubleThree: true,
+          checkDoubleFour: false,
+          checkOverline: true
+        });
+
+        if (forbidden.isForbidden) {
+          sound.playWarning();
+          this.showToast(`⚠️ ${forbidden.reason || '先手三三禁手，此步违规不可落子！'}`);
+          return;
+        }
+      }
+
+      // 玩家成功落子
+      this.executeMove(r, c, this.playerColor);
+
+      // 检查胜负
+      if (this.checkGameEnd(r, c, this.playerColor)) {
+        return;
+      }
+
+      // 轮到 AI 落子
+      this.turn = this.aiColor;
+      this.updateStatus();
+      this.triggerAIMove();
     }
-
-    // 玩家成功落子
-    this.executeMove(r, c, this.playerColor);
-
-    // 检查胜负
-    if (this.checkGameEnd(r, c, this.playerColor)) {
-      return;
-    }
-
-    // 轮到 AI 落子
-    this.turn = this.aiColor;
-    this.updateStatus();
-    this.triggerAIMove();
   }
 
   /**
@@ -406,6 +477,31 @@ class GomokuApp {
       this.goban.setLocked(true);
       this.goban.setBoardState(this.board, { r: lastR, c: lastC, color: lastColor }, winResult.winLine, []);
 
+      // 双人人人对战模式结算
+      if (this.isPvP()) {
+        sound.playWin();
+        const winnerName = lastColor === BLACK ? '黑方 (先手)' : '白方 (后手)';
+        StorageManager.recordGame({
+          result: 'win',
+          playerColor: '双人对弈',
+          aiMode: '双人同屏',
+          difficulty: '人人对战',
+          modelName: `${winnerName}胜出`,
+          turns: this.moveHistory.length,
+          duration: this.formatTime(this.elapsedSeconds),
+          moves: this.moveHistory
+        });
+
+        this.updateStatsBar();
+
+        setTimeout(() => {
+          this.showWinModal(true, `【${winnerName}】五子连珠，恭喜获胜！`);
+        }, 700);
+
+        return true;
+      }
+
+      // 人机对弈模式结算
       const isPlayerWin = this.winner === this.playerColor;
 
       if (isPlayerWin) {
@@ -445,10 +541,10 @@ class GomokuApp {
 
       StorageManager.recordGame({
         result: 'draw',
-        playerColor: this.playerColor === BLACK ? '黑棋' : '白棋',
-        aiMode: this.settings.aiEngine === 'llm' ? '大模型' : '本地算法',
-        difficulty: this.getDifficultyLabel(this.settings.difficulty),
-        modelName: this.settings.aiEngine === 'llm' ? this.settings.llmConfig.model : '内置引擎',
+        playerColor: this.isPvP() ? '双人对弈' : (this.playerColor === BLACK ? '黑棋' : '白棋'),
+        aiMode: this.isPvP() ? '双人同屏' : (this.settings.aiEngine === 'llm' ? '大模型' : '本地算法'),
+        difficulty: this.isPvP() ? '人人对战' : this.getDifficultyLabel(this.settings.difficulty),
+        modelName: this.isPvP() ? '握手言和' : (this.settings.aiEngine === 'llm' ? this.settings.llmConfig.model : '内置引擎'),
         turns: this.moveHistory.length,
         duration: this.formatTime(this.elapsedSeconds),
         moves: this.moveHistory
@@ -476,23 +572,28 @@ class GomokuApp {
       return;
     }
 
-    // 若轮到玩家，说明 AI 已经落子，需同时撤销 AI 的一步与玩家的一步 (共2手)
-    // 若玩家执白且第一步为 AI 下的，只剩 1 步时只能撤销 1 步
-    const stepsToUndo = this.turn === this.playerColor ? 2 : 1;
+    // 双人模式每次只撤销 1 手（上一位玩家的落子）
+    // 人机模式下，若轮到玩家，需同时撤销 AI 和玩家各 1 手 (共2手)
+    const stepsToUndo = this.isPvP() ? 1 : (this.turn === this.playerColor ? 2 : 1);
 
     for (let i = 0; i < stepsToUndo; i++) {
       if (this.moveHistory.length === 0) break;
       const last = this.moveHistory.pop();
       this.board[last.r][last.c] = EMPTY;
+      if (this.isPvP()) {
+        this.turn = last.color; // 双人模式下，把回合准确还给刚撤销的这方
+      }
     }
 
     sound.playUndo();
 
-    // 重新校准回合为玩家
-    this.turn = this.playerColor;
+    if (!this.isPvP()) {
+      this.turn = this.playerColor;
+    }
+
     const previousMove = this.moveHistory[this.moveHistory.length - 1] || null;
 
-    const forbidden = this.playerColor === BLACK && this.settings.checkDoubleThree
+    const forbidden = this.turn === BLACK && this.settings.checkDoubleThree
       ? this.calculateForbiddenPoints()
       : [];
 
@@ -502,7 +603,9 @@ class GomokuApp {
 
     this.stepCountEl.textContent = this.moveHistory.length;
     this.updateStatus();
-    this.showToast('悔棋成功，请重新落子');
+    this.showToast(this.isPvP()
+      ? `已撤销上一步，轮到【${this.turn === BLACK ? '黑方' : '白方'}】落子`
+      : '悔棋成功，请重新落子');
   }
 
   /**
@@ -510,6 +613,32 @@ class GomokuApp {
    */
   handleResign() {
     if (this.gameStatus !== 'playing') return;
+
+    if (this.isPvP()) {
+      const resignPlayer = this.turn === BLACK ? '黑方' : '白方';
+      const winPlayer = this.turn === BLACK ? '白方' : '黑方';
+      if (confirm(`当前轮到【${resignPlayer}】落子，确定要认输吗？`)) {
+        this.gameStatus = 'ended';
+        this.winner = this.turn === BLACK ? WHITE : BLACK;
+        this.stopTimer();
+        sound.playWin();
+
+        StorageManager.recordGame({
+          result: 'win',
+          playerColor: '双人对弈',
+          aiMode: '双人同屏',
+          difficulty: '人人对战',
+          modelName: `${winPlayer}胜出`,
+          turns: this.moveHistory.length,
+          duration: this.formatTime(this.elapsedSeconds),
+          moves: this.moveHistory
+        });
+
+        this.updateStatsBar();
+        this.showWinModal(true, `【${resignPlayer}】已认输，【${winPlayer}】获胜！`);
+      }
+      return;
+    }
 
     if (confirm('确定要认输本局吗？')) {
       this.gameStatus = 'ended';
@@ -537,17 +666,25 @@ class GomokuApp {
    * 智能走法提示
    */
   handleHint() {
-    if (this.gameStatus !== 'playing' || this.turn !== this.playerColor) {
+    if (this.gameStatus !== 'playing') {
+      this.showToast('对局未在进行中');
+      return;
+    }
+
+    if (!this.isPvP() && this.turn !== this.playerColor) {
       this.showToast('请在您的回合获取提示');
       return;
     }
 
-    const best = getBestMove(this.board, this.playerColor, 'high', {
-      checkDoubleThree: this.playerColor === BLACK && this.settings.checkDoubleThree
+    const currentHintColor = this.isPvP() ? this.turn : this.playerColor;
+
+    const best = getBestMove(this.board, currentHintColor, 'high', {
+      checkDoubleThree: currentHintColor === BLACK && this.settings.checkDoubleThree
     });
 
     if (best) {
-      this.showToast(`💡 建议点位：${best.notation} (评估得分: ${Math.round(best.score)})`);
+      const hintPlayer = currentHintColor === BLACK ? '黑方' : '白方';
+      this.showToast(`💡 建议点位：${best.notation}（为【${hintPlayer}】推荐，得分: ${Math.round(best.score)}）`);
       this.goban.hoverPos = { r: best.r, c: best.c };
       this.goban.render();
     }
@@ -581,19 +718,33 @@ class GomokuApp {
    */
   updateStatus() {
     if (this.gameStatus === 'playing') {
-      const isPlayerTurn = this.turn === this.playerColor;
-      this.statusTextEl.textContent = isPlayerTurn ? '轮到您落子' : 'AI 思考中...';
-      this.turnBadgeEl.className = `turn-badge ${this.turn === BLACK ? 'turn-black' : 'turn-white'}`;
-      this.turnBadgeEl.textContent = this.turn === BLACK ? '黑方回合' : '白方回合';
+      if (this.isPvP()) {
+        this.statusTextEl.textContent = this.turn === BLACK ? '轮到黑方落子 (先手)' : '轮到白方落子 (后手)';
+        this.turnBadgeEl.className = `turn-badge ${this.turn === BLACK ? 'turn-black' : 'turn-white'}`;
+        this.turnBadgeEl.textContent = this.turn === BLACK ? '黑方回合' : '白方回合';
+      } else {
+        const isPlayerTurn = this.turn === this.playerColor;
+        this.statusTextEl.textContent = isPlayerTurn ? '轮到您落子' : 'AI 思考中...';
+        this.turnBadgeEl.className = `turn-badge ${this.turn === BLACK ? 'turn-black' : 'turn-white'}`;
+        this.turnBadgeEl.textContent = this.turn === BLACK ? '黑方回合' : '白方回合';
+      }
     } else if (this.gameStatus === 'ended') {
       this.turnBadgeEl.className = 'turn-badge turn-ended';
       this.turnBadgeEl.textContent = '对局结束';
-      if (this.winner === this.playerColor) {
-        this.statusTextEl.textContent = '🎉 恭喜获得胜利！';
-      } else if (this.winner === this.aiColor) {
-        this.statusTextEl.textContent = '⚔️ AI 获胜，再接再厉！';
+      if (this.isPvP()) {
+        if (this.winner === 'draw') {
+          this.statusTextEl.textContent = '握手言和！';
+        } else {
+          this.statusTextEl.textContent = `🏆 【${this.winner === BLACK ? '黑方' : '白方'}】获胜！`;
+        }
       } else {
-        this.statusTextEl.textContent = '平局！';
+        if (this.winner === this.playerColor) {
+          this.statusTextEl.textContent = '🎉 恭喜获得胜利！';
+        } else if (this.winner === this.aiColor) {
+          this.statusTextEl.textContent = '⚔️ AI 获胜，再接再厉！';
+        } else {
+          this.statusTextEl.textContent = '平局！';
+        }
       }
     }
   }
@@ -601,8 +752,16 @@ class GomokuApp {
   updateEngineBadge() {
     const badge = document.getElementById('engineBadge');
     if (badge) {
-      badge.textContent = this.settings.aiEngine === 'llm' ? '大模型' : '本地算法';
-      badge.className = `badge ${this.settings.aiEngine === 'llm' ? 'badge-llm' : 'badge-local'}`;
+      if (this.isPvP()) {
+        badge.textContent = '双人对弈';
+        badge.className = 'badge badge-pvp';
+      } else if (this.settings.aiEngine === 'llm') {
+        badge.textContent = '大模型';
+        badge.className = 'badge badge-llm';
+      } else {
+        badge.textContent = '本地算法';
+        badge.className = 'badge badge-local';
+      }
     }
   }
 
@@ -695,21 +854,30 @@ class GomokuApp {
     const timeEl = document.getElementById('winModalTime');
     const modeEl = document.getElementById('winModalMode');
 
-    if (isPlayerWin) {
-      titleEl.innerHTML = '🏆 棋高一着 · 恭喜获胜！';
+    if (this.isPvP()) {
+      const winnerName = this.winner === BLACK ? '黑方 (先手)' : '白方 (后手)';
+      titleEl.innerHTML = `🏆 【${winnerName}】获胜！`;
       titleEl.className = 'win-title player-win';
-      subtitleEl.textContent = customSubtitle || '妙手连连，成功击败对手！';
+      subtitleEl.textContent = customSubtitle || '双人同屏对弈精妙绝伦，恭喜胜出！';
+      modeEl.textContent = '双人同屏 (人人对弈)';
     } else {
-      titleEl.innerHTML = '⚔️ 棋局落幕 · AI 获胜';
-      titleEl.className = 'win-title player-lose';
-      subtitleEl.textContent = customSubtitle || '弈道深远，胜败皆有趣，再来一局吧！';
+      if (isPlayerWin) {
+        titleEl.innerHTML = '🏆 棋高一着 · 恭喜获胜！';
+        titleEl.className = 'win-title player-win';
+        subtitleEl.textContent = customSubtitle || '妙手连连，成功击败对手！';
+      } else {
+        titleEl.innerHTML = '⚔️ 棋局落幕 · AI 获胜';
+        titleEl.className = 'win-title player-lose';
+        subtitleEl.textContent = customSubtitle || '弈道深远，胜败皆有趣，再来一局吧！';
+      }
+
+      modeEl.textContent = this.settings.aiEngine === 'llm'
+        ? `大模型 (${this.settings.llmConfig.model})`
+        : `本地算法 (${this.getDifficultyLabel(this.settings.difficulty)})`;
     }
 
     turnsEl.textContent = `${this.moveHistory.length} 步`;
     timeEl.textContent = this.formatTime(this.elapsedSeconds);
-    modeEl.textContent = this.settings.aiEngine === 'llm'
-      ? `大模型 (${this.settings.llmConfig.model})`
-      : `本地算法 (${this.getDifficultyLabel(this.settings.difficulty)})`;
 
     this.winModal.classList.add('active');
   }
@@ -822,6 +990,7 @@ class GomokuApp {
       };
 
       const colorChanged = this.settings.playerColor !== playerColor;
+      const modeChanged = this.settings.aiEngine !== engine;
 
       this.settings = {
         ...this.settings,
@@ -842,7 +1011,7 @@ class GomokuApp {
       this.settingsModal.classList.remove('active');
       this.showToast('设置已保存');
 
-      if (colorChanged && confirm('执棋先后手已发生变动，是否立即重新开局？')) {
+      if ((colorChanged || modeChanged) && confirm('对弈模式或执棋方已发生变动，是否立即重新开局？')) {
         this.startNewGame();
       }
     });
