@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>弈境五子棋 · AI 对弈平台 (Gomoku AI)</title>
+  <meta name="description" content="在线五子棋对弈网页版，支持本地高难度算法与大模型(DeepSeek/Gemini/OpenAI)接入，先手三三禁手规则，悔棋与战绩保存。">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23222'/><circle cx='40' cy='38' r='10' fill='%23666'/></svg>">
+</head>
+<body>
+  <div class="app-container">
+    <!-- 顶部导航栏 -->
+    <header class="navbar">
+      <div class="nav-brand">
+        <span class="logo-icon">☯</span>
+        <h1>弈境五子棋</h1>
+        <span class="badge badge-local" id="engineBadge">本地算法</span>
+      </div>
+
+      <div class="nav-quick-controls">
+        <div class="quick-select-group">
+          <label for="difficultySelect">难度：</label>
+          <select id="difficultySelect" class="form-select-sm">
+            <option value="low">入门低难度</option>
+            <option value="medium" selected>业余中难度</option>
+            <option value="high">大师高难度</option>
+          </select>
+        </div>
+
+        <div class="quick-select-group">
+          <label for="engineSelect">对弈：</label>
+          <select id="engineSelect" class="form-select-sm">
+            <option value="local" selected>本地智能算法</option>
+            <option value="llm">大模型对战</option>
+          </select>
+        </div>
+
+        <button id="btnSoundToggle" class="btn-icon" title="切换声音">🔊 声音开</button>
+        <button id="btnRules" class="btn-icon" title="五子棋与禁手规则">📖 规则</button>
+      </div>
+    </header>
+
+    <!-- 战绩与状态快捷横幅 -->
+    <section class="stats-banner">
+      <div id="statsBarText" class="stats-summary">
+        战绩加载中...
+      </div>
+      <div class="rules-pill" title="标准五子棋规则：先手黑棋不可下三三禁手">
+        ⚠️ 先手三三禁手限制已生效
+      </div>
+    </section>
+
+    <!-- 核心棋盘与操作区 -->
+    <main class="main-layout">
+      <!-- 棋盘区域 -->
+      <section class="board-wrapper">
+        <div class="goban-frame">
+          <canvas id="boardCanvas"></canvas>
+        </div>
+
+        <!-- 棋盘下方状态卡 -->
+        <div class="board-status-bar">
+          <div class="status-left">
+            <span id="turnBadge" class="turn-badge turn-black">黑方回合</span>
+            <span id="statusText" class="status-text">轮到您落子</span>
+          </div>
+          <div class="status-right">
+            <div class="stat-pill">
+              <span class="pill-label">步数</span>
+              <span id="stepCount" class="pill-value">0</span>
+            </div>
+            <div class="stat-pill">
+              <span class="pill-label">时间</span>
+              <span id="gameTimer" class="pill-value">00:00</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 操作按钮工具栏 -->
+        <div class="toolbar">
+          <button id="btnNewGame" class="btn btn-primary" title="重新开始一局">
+            <span class="btn-icon-text">🔄</span> 重新开局
+          </button>
+          <button id="btnUndo" class="btn btn-warning" title="悔棋（撤销双方最近一手）">
+            <span class="btn-icon-text">↩️</span> 悔棋
+          </button>
+          <button id="btnHint" class="btn btn-info" title="AI 为你提示当前最优落子点">
+            <span class="btn-icon-text">💡</span> 走法提示
+          </button>
+          <button id="btnResign" class="btn btn-danger" title="主动认输">
+            <span class="btn-icon-text">🏳️</span> 认输
+          </button>
+          <button id="btnHistory" class="btn btn-secondary" title="查看战绩统计与历史记录">
+            <span class="btn-icon-text">📜</span> 战绩记录
+          </button>
+          <button id="btnSettings" class="btn btn-secondary" title="配置对战难度、大模型接口与规则">
+            <span class="btn-icon-text">⚙️</span> 设置
+          </button>
+        </div>
+      </section>
+
+      <!-- 侧边栏：AI 棋手卡片与对话 -->
+      <aside class="side-panel">
+        <!-- AI 卡片 -->
+        <div class="panel-card ai-card">
+          <div class="ai-avatar-wrapper">
+            <div class="ai-avatar">🤖</div>
+            <div class="ai-info">
+              <h3 id="aiCardTitle">AI 棋客</h3>
+              <span class="ai-tag">博弈对手</span>
+            </div>
+          </div>
+
+          <!-- AI 实时对话气泡 -->
+          <div id="aiSpeechBubble" class="ai-speech-bubble">
+            <div class="bubble-arrow"></div>
+            <p id="aiSpeechText">棋逢对手，请赐教！</p>
+          </div>
+        </div>
+
+        <!-- 快速功能指南 -->
+        <div class="panel-card tips-card">
+          <h4>💡 下棋小贴士</h4>
+          <ul class="tips-list">
+            <li><strong>先手禁手：</strong>执黑先行存在三三禁手规则，形成两个活三将被判定违规。</li>
+            <li><strong>悔棋功能：</strong>点击“悔棋”即可退回上一步，方便深思复盘。</li>
+            <li><strong>大模型对战：</strong>可在“设置”中填入 DeepSeek、Gemini、通义千问等 API Key，开启智能人设立体对弈！</li>
+            <li><strong>云端免费部署：</strong>静态无缝托管于 Cloudflare Pages，手机电脑皆可畅玩。</li>
+          </ul>
+        </div>
+      </aside>
+    </main>
+
+    <!-- 底部版权 -->
+    <footer class="footer">
+      <p>弈境五子棋 · 开源免费 · 可自建部署于 Cloudflare Pages</p>
+    </footer>
+  </div>
+
+  <!-- Toast 提示组件 -->
+  <div id="toast" class="toast"></div>
+
+  <!-- 1. 设置弹窗 Modal -->
+  <div id="settingsModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>⚙️ 对弈与大模型设置</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- 先后手选择 -->
+        <div class="form-group">
+          <label class="form-label">执棋方选择：</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" name="cfgPlayerColor" value="1"> 玩家执黑 (先手)
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="cfgPlayerColor" value="2"> 玩家执白 (后手，AI先下)
+            </label>
+          </div>
+        </div>
+
+        <!-- 对战引擎选择 -->
+        <div class="form-group">
+          <label class="form-label">AI 对弈引擎：</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" name="cfgAiEngine" value="local"> 本地智能算法 (零延迟、免Key、离线可用)
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="cfgAiEngine" value="llm"> 大模型 API (DeepSeek/Gemini/OpenAI/千问等)
+            </label>
+          </div>
+        </div>
+
+        <!-- 本地难度选择 -->
+        <div class="form-group">
+          <label class="form-label">本地引擎难度等级：</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" name="cfgDifficulty" value="low"> 入门低难度 (轻松休闲)
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="cfgDifficulty" value="medium"> 业余中难度 (攻守兼备)
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="cfgDifficulty" value="high"> 大师高难度 (Alpha-Beta深度搜索)
+            </label>
+          </div>
+        </div>
+
+        <!-- 规则选项 -->
+        <div class="form-group">
+          <label class="form-label">规则限制：</label>
+          <div class="checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgCheckDoubleThree" checked> 开启先手三三禁手规则 (严格限制先手黑棋不可下双活三)
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgShowForbiddenMarks" checked> 在棋盘上以红色微标记提示当前三三禁手点
+            </label>
+          </div>
+        </div>
+
+        <!-- 大模型专用配置区块 -->
+        <div id="llmConfigSection" class="llm-config-box">
+          <h3 class="box-title">🤖 大模型 API 配置</h3>
+          <p class="box-desc">支持任意兼容 OpenAI 接口规范的服务商。密钥保存在您的本地浏览器中，安全无泄露风险。</p>
+
+          <div class="form-group">
+            <label class="form-label">快速选择服务商：</label>
+            <select id="cfgLlmProvider" class="form-control">
+              <option value="deepseek">DeepSeek (推荐，高智商对弈)</option>
+              <option value="gemini">Google Gemini (OpenAI兼容端点)</option>
+              <option value="openai">OpenAI (ChatGPT)</option>
+              <option value="qwen">阿里通义千问 (DashScope)</option>
+              <option value="moonshot">月之暗面 (Kimi)</option>
+              <option value="custom">自定义 / 本地 Ollama / OneAPI</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">API 基础路径 (Base URL)：</label>
+            <input type="text" id="cfgLlmBaseUrl" class="form-control" placeholder="https://api.deepseek.com/v1">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">API Key：</label>
+            <div class="input-with-button">
+              <input type="password" id="cfgLlmApiKey" class="form-control" placeholder="sk-xxxxxxxxxxxxxxxx">
+              <button type="button" id="btnToggleKeyVisibility" class="btn btn-outline-sm">👁️ 显示</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">模型名称 (Model)：</label>
+            <input type="text" id="cfgLlmModel" class="form-control" placeholder="deepseek-chat">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">AI 对话人设性格：</label>
+            <select id="cfgLlmPersona" class="form-control">
+              <option value="humorous">幽默话痨 (风趣幽默，爱唠叨吐槽)</option>
+              <option value="master">世外高人 (沉稳儒雅，蕴含禅意哲理)</option>
+              <option value="tsundere">傲娇对手 (嘴硬心软，好胜心强)</option>
+              <option value="analytical">严谨冷静 (理性精密，战术推演)</option>
+            </select>
+          </div>
+
+          <div class="test-row">
+            <button type="button" id="btnTestLlm" class="btn btn-secondary">⚡ 测试模型连接</button>
+            <span id="llmTestResult" class="test-result"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnSaveSettings" class="btn btn-primary">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. 战绩与历史记录 Modal -->
+  <div id="historyModal" class="modal-overlay">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h2>📜 战绩统计与历史对局</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- 统计面板 -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <span class="stat-number" id="histTotal">0</span>
+            <span class="stat-name">总对局</span>
+          </div>
+          <div class="stat-card text-success">
+            <span class="stat-number" id="histWins">0</span>
+            <span class="stat-name">胜局</span>
+          </div>
+          <div class="stat-card text-danger">
+            <span class="stat-number" id="histLosses">0</span>
+            <span class="stat-name">败局</span>
+          </div>
+          <div class="stat-card text-warning">
+            <span class="stat-number" id="histWinRate">0%</span>
+            <span class="stat-name">综合胜率</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-number" id="histStreak">0</span>
+            <span class="stat-name">最高连胜</span>
+          </div>
+        </div>
+
+        <!-- 历史列表 -->
+        <h3 class="section-title">最近对局明细</h3>
+        <div id="historyListContainer" class="history-list">
+          <div class="empty-hint">暂无对局历史记录</div>
+        </div>
+      </div>
+
+      <div class="modal-footer modal-footer-between">
+        <button id="btnClearHistory" class="btn btn-outline-danger">清空所有记录</button>
+        <button class="btn btn-secondary modal-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. 赢局与终局提示 Modal -->
+  <div id="winModal" class="modal-overlay">
+    <div class="modal-card modal-sm text-center">
+      <div class="win-icon" id="winModalIcon">🏆</div>
+      <h2 id="winModalTitle" class="win-title">恭喜获胜！</h2>
+      <p id="winModalSubtitle" class="win-subtitle">棋局精彩绝伦！</p>
+
+      <div class="win-details">
+        <div class="detail-row">
+          <span>总落子步数：</span>
+          <strong id="winModalTurns">0 步</strong>
+        </div>
+        <div class="detail-row">
+          <span>对局耗时：</span>
+          <strong id="winModalTime">00:00</strong>
+        </div>
+        <div class="detail-row">
+          <span>对阵对手：</span>
+          <strong id="winModalMode">本地算法</strong>
+        </div>
+      </div>
+
+      <div class="win-actions">
+        <button id="btnWinModalNewGame" class="btn btn-primary btn-block">再来一局</button>
+        <button id="btnWinModalViewHistory" class="btn btn-secondary btn-block">查看对局战绩</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 规则说明 Modal -->
+  <div id="rulesModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>📖 五子棋与先手禁手规则说明</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body rules-content">
+        <h3>1. 基本规则</h3>
+        <p>五子棋在 15×15 的棋盘上进行，黑先白后，双方轮流落子。任何一方率先在横向、纵向或对角线方向连成五颗同色棋子，即获得胜利。</p>
+
+        <h3>2. 先手优势与【三三禁手】</h3>
+        <p>现代竞技五子棋（连珠规则）中，先手黑棋拥有极大的先行进攻优势。如果不加限制，黑棋必胜。因此国际比赛对先手黑棋施加了禁手规则：</p>
+        <ul>
+          <li><strong>三三禁手（核心规则）：</strong>黑棋一子落下，若同时形成两个或两个以上的“活三”，则判定为违规禁手，黑棋不可在此落子。</li>
+          <li><strong>什么是活三？</strong>两端均未被白棋封堵、下一步即可成“活四”的三颗黑子（如 <code>_XXX_</code> 或跳三 <code>_X_XX_</code>）。</li>
+          <li><strong>白棋无禁手：</strong>后手白棋没有任何禁手限制，可以下三三、四四，白棋连成6颗或以上也算获胜。</li>
+          <li><strong>五连优先：</strong>若黑棋落子形成五连的同时也构成了三三，以五连获胜优先，不算禁手。</li>
+        </ul>
+
+        <h3>3. 游戏功能特性</h3>
+        <ul>
+          <li><strong>悔棋：</strong>点击悔棋按钮，将撤销双方最近一轮的走子，随时可重新深思。</li>
+          <li><strong>大模型对弈：</strong>切换为大模型模式后，AI 具备个性人设（幽默吐槽、棋圣禅意等），边下棋边对话，趣味盎然。</li>
+          <li><strong>战绩持久保存：</strong>对局胜负、胜率、最高连胜自动保存在您的设备中，随时查看复盘。</li>
+        </ul>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-primary modal-close">了解了，开始下棋</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
