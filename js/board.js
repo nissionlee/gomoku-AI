@@ -38,8 +38,9 @@ export class Goban {
     const parent = this.canvas.parentElement;
     if (!parent) return;
     const containerWidth = parent.clientWidth;
-    // 保持正方形，考虑 padding
-    const size = Math.min(containerWidth, 680);
+    // 保持正方形，同时兼顾横竖屏与电子书/手机视口高度，确保下方工具栏可见
+    const maxByHeight = window.innerHeight ? Math.max(280, window.innerHeight * 0.60) : 680;
+    const size = Math.floor(Math.min(containerWidth, 680, maxByHeight));
     const dpr = window.devicePixelRatio || 1;
 
     this.canvas.width = size * dpr;
@@ -61,8 +62,9 @@ export class Goban {
   initEvents() {
     const getPosFromEvent = (e) => {
       const rect = this.canvas.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      const touch = e.changedTouches ? e.changedTouches[0] : (e.touches ? e.touches[0] : e);
+      const clientX = touch.clientX;
+      const clientY = touch.clientY;
       const x = clientX - rect.left;
       const y = clientY - rect.top;
 
@@ -75,6 +77,7 @@ export class Goban {
       return null;
     };
 
+    // 鼠标悬停预览 (桌面端)
     this.canvas.addEventListener('mousemove', (e) => {
       if (this.isLocked) return;
       const pos = getPosFromEvent(e);
@@ -91,23 +94,55 @@ export class Goban {
       }
     });
 
-    const handleClickOrTouch = (e) => {
+    // 触摸交互：准确区分【上下滑动翻页】与【轻触点击落子】
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let isTouchSwiping = false;
+    let lastTouchTime = 0;
+
+    this.canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        isTouchSwiping = false;
+      }
+    }, { passive: true });
+
+    this.canvas.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 1) {
+        const dx = Math.abs(e.touches[0].clientX - touchStartX);
+        const dy = Math.abs(e.touches[0].clientY - touchStartY);
+        // 手指移动超过 6px 即判定为页面滑动，不触发落子
+        if (dx > 6 || dy > 6) {
+          isTouchSwiping = true;
+          this.hoverPos = null;
+        }
+      }
+    }, { passive: true });
+
+    this.canvas.addEventListener('touchend', (e) => {
+      this.hoverPos = null;
+      // 若用户在滑动翻看网页下方内容，直接返回，不阻止滚动也不落子
+      if (isTouchSwiping) return;
+      if (this.isLocked) return;
+
+      const pos = getPosFromEvent(e);
+      if (pos && this.onCellClick) {
+        lastTouchTime = Date.now();
+        this.onCellClick(pos.r, pos.c);
+      }
+    });
+
+    // 鼠标点击 (避免与触摸冲突)
+    this.canvas.addEventListener('click', (e) => {
+      if (Date.now() - lastTouchTime < 450) {
+        return; // 刚处理过 touch，忽略生成的模拟 click
+      }
       if (this.isLocked) return;
       const pos = getPosFromEvent(e);
       if (pos && this.onCellClick) {
         this.onCellClick(pos.r, pos.c);
       }
-    };
-
-    this.canvas.addEventListener('click', (e) => {
-      e.preventDefault();
-      handleClickOrTouch(e);
-    });
-
-    this.canvas.addEventListener('touchend', (e) => {
-      e.preventDefault();
-      handleClickOrTouch(e);
-      this.hoverPos = null;
     });
   }
 

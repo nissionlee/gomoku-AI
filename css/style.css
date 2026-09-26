@@ -34,6 +34,13 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+html {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   background-color: var(--bg-primary);
@@ -41,17 +48,20 @@ body {
     radial-gradient(circle at 10% 20%, rgba(95, 50, 15, 0.15) 0%, transparent 40%),
     radial-gradient(circle at 90% 80%, rgba(30, 18, 10, 0.3) 0%, transparent 50%);
   color: var(--text-main);
-  min-height: 100vh;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
 
 /* 页面主容器 */
 .app-container {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 16px 20px;
+  padding: 16px 20px 60px 20px;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -219,6 +229,7 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
+  touch-action: pan-y;
 }
 
 #boardCanvas {
@@ -226,7 +237,7 @@ body {
   height: 100%;
   border-radius: calc(var(--radius-lg) - 6px);
   cursor: pointer;
-  touch-action: none;
+  touch-action: pan-y;
 }
 
 /* 棋盘下方状态卡 */
