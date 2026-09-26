@@ -76,9 +76,21 @@ class GomokuApp {
     this.rulesModal = document.getElementById('rulesModal');
     this.winModal = document.getElementById('winModal');
     this.toastEl = document.getElementById('toast');
+
+    // 锁屏认证元素 (专属密码: 362514)
+    this.authOverlay = document.getElementById('authOverlay');
+    this.authCard = document.getElementById('authCard');
+    this.authPinInput = document.getElementById('authPinInput');
+    this.authRememberMe = document.getElementById('authRememberMe');
+    this.btnUnlockApp = document.getElementById('btnUnlockApp');
+    this.authErrorMsg = document.getElementById('authErrorMsg');
+    this.btnLockApp = document.getElementById('btnLockApp');
   }
 
   bindEvents() {
+    // 密码认证体系
+    this.initAuth();
+
     // 基础控制
     this.btnNewGame.addEventListener('click', () => this.startNewGame());
     this.btnUndo.addEventListener('click', () => this.handleUndo());
@@ -145,6 +157,79 @@ class GomokuApp {
   }
 
   /**
+   * 密码认证体系 (专属密码: 362514)
+   */
+  isUnlocked() {
+    const ACCESS_PIN = '362514';
+    return localStorage.getItem('gomoku_pin') === ACCESS_PIN ||
+           sessionStorage.getItem('gomoku_pin') === ACCESS_PIN;
+  }
+
+  initAuth() {
+    const ACCESS_PIN = '362514';
+
+    const unlock = () => {
+      document.documentElement.classList.add('app-unlocked');
+      if (this.authOverlay) this.authOverlay.style.display = 'none';
+      if (this.goban) this.goban.setLocked(false);
+    };
+
+    const lock = () => {
+      localStorage.removeItem('gomoku_pin');
+      sessionStorage.removeItem('gomoku_pin');
+      document.documentElement.classList.remove('app-unlocked');
+      if (this.authOverlay) {
+        this.authOverlay.style.display = 'flex';
+        if (this.authPinInput) {
+          this.authPinInput.value = '';
+          this.authPinInput.focus();
+        }
+        if (this.authErrorMsg) this.authErrorMsg.textContent = '';
+      }
+      if (this.goban) this.goban.setLocked(true);
+    };
+
+    if (this.isUnlocked()) {
+      unlock();
+    } else {
+      document.documentElement.classList.remove('app-unlocked');
+      if (this.authOverlay) this.authOverlay.style.display = 'flex';
+      if (this.goban) this.goban.setLocked(true);
+    }
+
+    const handleAttempt = () => {
+      const val = (this.authPinInput?.value || '').trim();
+      if (val === ACCESS_PIN) {
+        if (this.authRememberMe?.checked) {
+          localStorage.setItem('gomoku_pin', ACCESS_PIN);
+        } else {
+          sessionStorage.setItem('gomoku_pin', ACCESS_PIN);
+        }
+        unlock();
+        this.showToast('✅ 密码正确，欢迎进入对弈！');
+      } else {
+        if (this.authErrorMsg) this.authErrorMsg.textContent = '密码错误，请重新输入';
+        if (this.authCard) {
+          this.authCard.classList.remove('shake');
+          void this.authCard.offsetWidth; // 触发回流动画
+          this.authCard.classList.add('shake');
+        }
+        this.authPinInput?.select();
+      }
+    };
+
+    this.btnUnlockApp?.addEventListener('click', handleAttempt);
+    this.authPinInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleAttempt();
+    });
+
+    this.btnLockApp?.addEventListener('click', () => {
+      lock();
+      this.showToast('🔒 已锁定对弈界面');
+    });
+  }
+
+  /**
    * 开始新对局
    */
   startNewGame() {
@@ -186,6 +271,7 @@ class GomokuApp {
    * 玩家点击棋盘
    */
   handlePlayerClick(r, c) {
+    if (!this.isUnlocked()) return;
     if (this.gameStatus !== 'playing') return;
     if (this.turn !== this.playerColor) return;
     if (this.board[r][c] !== EMPTY) return;

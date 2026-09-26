@@ -985,3 +985,110 @@ body {
     align-items: flex-start;
   }
 }
+
+/* ================= 7. 密码认证锁屏 ================= */
+.auth-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: radial-gradient(circle at center, #241a13 0%, #120d0a 100%);
+  backdrop-filter: blur(16px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999;
+  padding: 20px;
+}
+
+.app-unlocked .auth-overlay {
+  display: none !important;
+}
+
+.auth-card {
+  background: var(--bg-card);
+  border: 1px solid var(--accent-gold);
+  border-radius: var(--radius-lg);
+  padding: 32px 28px;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.75), 0 0 24px rgba(212, 136, 6, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: auth-fadein 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes auth-fadein {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.auth-card.shake {
+  animation: auth-shake 0.4s ease;
+}
+
+@keyframes auth-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-8px); }
+  40%, 80% { transform: translateX(8px); }
+}
+
+.auth-icon {
+  font-size: 3rem;
+  color: var(--accent-gold);
+  line-height: 1;
+}
+
+.auth-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #fff2db;
+}
+
+.auth-desc {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.auth-input-group {
+  margin: 6px 0;
+}
+
+.auth-input {
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 2px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: #fff;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: 8px;
+  text-align: center;
+  padding: 10px 14px;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.auth-input:focus {
+  border-color: var(--accent-gold);
+  box-shadow: 0 0 12px rgba(212, 136, 6, 0.35);
+}
+
+.auth-remember-row {
+  display: flex;
+  justify-content: center;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.auth-error-msg {
+  font-size: 0.85rem;
+  color: #ff4d4f;
+  min-height: 1.2em;
+  font-weight: 500;
+}
+

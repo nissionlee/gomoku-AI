@@ -7,8 +7,40 @@
   <meta name="description" content="在线五子棋对弈网页版，支持本地高难度算法与大模型(DeepSeek/Gemini/OpenAI)接入，先手三三禁手规则，悔棋与战绩保存。">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23222'/><circle cx='40' cy='38' r='10' fill='%23666'/></svg>">
+  <script>
+    (function() {
+      try {
+        var pin = localStorage.getItem('gomoku_pin') || sessionStorage.getItem('gomoku_pin');
+        if (pin === '362514') {
+          document.documentElement.classList.add('app-unlocked');
+        }
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
+  <!-- 专属访问密码锁屏 (密码: 362514) -->
+  <div id="authOverlay" class="auth-overlay">
+    <div class="auth-card" id="authCard">
+      <div class="auth-icon">☯</div>
+      <h2 class="auth-title">弈境五子棋 · 私人专属</h2>
+      <p class="auth-desc">此为私人对弈空间，请输入访问密码以解锁进入</p>
+      
+      <div class="auth-input-group">
+        <input type="password" id="authPinInput" class="auth-input" maxlength="10" placeholder="••••••" autofocus inputmode="numeric">
+      </div>
+
+      <div class="auth-remember-row">
+        <label class="checkbox-label">
+          <input type="checkbox" id="authRememberMe" checked> 在此设备记住密码（下次免输）
+        </label>
+      </div>
+
+      <button id="btnUnlockApp" class="btn btn-primary btn-block">解锁进入对弈</button>
+      <div id="authErrorMsg" class="auth-error-msg"></div>
+    </div>
+  </div>
+
   <div class="app-container">
     <!-- 顶部导航栏 -->
     <header class="navbar">
@@ -38,6 +70,7 @@
 
         <button id="btnSoundToggle" class="btn-icon" title="切换声音">🔊 声音开</button>
         <button id="btnRules" class="btn-icon" title="五子棋与禁手规则">📖 规则</button>
+        <button id="btnLockApp" class="btn-icon" title="锁定对弈界面">🔒 锁屏</button>
       </div>
     </header>
 
