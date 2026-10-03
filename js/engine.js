@@ -6,8 +6,8 @@
 
 import { EMPTY, BLACK, WHITE, BOARD_SIZE, DIRECTIONS, inBoard, checkWin, checkForbidden } from './rules.js';
 
-// 棋形分数表
-const SCORES = {
+// 棋形分数表（导出供棋局分析模块复用）
+export const SCORES = {
   WIN: 100000,      // 连五
   LIVE_FOUR: 10000, // 活四 (两头通)
   RUSH_FOUR: 1200,  // 冲四 (一头通或跳四)
@@ -16,6 +16,9 @@ const SCORES = {
   LIVE_TWO: 120,    // 活二
   SLEEP_TWO: 20,    // 眠二
 };
+
+// 四个方向的可读名称（与 DIRECTIONS 顺序一致）
+export const DIRECTION_LABELS = ['横向', '竖向', '斜向↘', '斜向↗'];
 
 // 坐标转国际棋盘代号 (例如 7, 7 -> H8)
 export function coordToNotation(r, c) {
@@ -38,7 +41,7 @@ export function notationToCoord(notation) {
 /**
  * 评估某一方向上线段的棋形得分
  */
-function evaluateDirection(board, r, c, dr, dc, color) {
+export function evaluateDirection(board, r, c, dr, dc, color) {
   const opponent = color === BLACK ? WHITE : BLACK;
   let count = 1;
   let openEnds = 0;
@@ -80,6 +83,36 @@ function evaluateDirection(board, r, c, dr, dc, color) {
     if (openEnds === 1) return SCORES.SLEEP_TWO;
   }
   return 0;
+}
+
+/**
+ * 将棋形得分翻译为中文术语（用于复盘解说）
+ */
+export function shapeName(score) {
+  if (score >= SCORES.WIN) return '五连';
+  if (score >= SCORES.LIVE_FOUR) return '活四';
+  if (score >= SCORES.RUSH_FOUR) return '冲四';
+  if (score >= SCORES.LIVE_THREE) return '活三';
+  if (score >= SCORES.SLEEP_THREE) return '眠三';
+  if (score >= SCORES.LIVE_TWO) return '活二';
+  if (score >= SCORES.SLEEP_TWO) return '眠二';
+  return '孤子';
+}
+
+/**
+ * 逐方向描述某个已落子点形成的棋形
+ * @param {number[][]} board 棋盘（(r,c) 处须已落下 color 的棋子）
+ * @returns {string[]} 例如 ['横向活三', '斜向↘眠二']
+ */
+export function describePoint(board, r, c, color) {
+  const shapes = [];
+  for (let i = 0; i < DIRECTIONS.length; i++) {
+    const score = evaluateDirection(board, r, c, DIRECTIONS[i][0], DIRECTIONS[i][1], color);
+    if (score > 0) {
+      shapes.push(`${DIRECTION_LABELS[i]}${shapeName(score)}`);
+    }
+  }
+  return shapes;
 }
 
 /**

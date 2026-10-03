@@ -5,7 +5,14 @@
 
 import { BOARD_SIZE, EMPTY, BLACK, WHITE, checkWin, checkForbidden, isBoardFull } from './rules.js';
 import { coordToNotation, getBestMove, getCandidateMoves } from './engine.js';
-import { getLLMMove, testLLMConnection, PROVIDER_PRESETS, AI_PERSONAS } from './llm.js';
+import {
+  COLOR_NAMES,
+  buildBoardFromMoves,
+  analyzeMove,
+  analyzePosition,
+  formatAnalysisForLLM
+} from './analysis.js';
+import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS } from './llm.js';
 import { sound } from './audio.js';
 import { StorageManager } from './storage.js';
 import { Goban } from './board.js';
@@ -26,6 +33,25 @@ class GomokuApp {
     this.settings = StorageManager.getSettings();
     sound.setMuted(!this.settings.soundEnabled);
 
+    // 落子轨迹回放状态（cursor 为「展示前 cursor 手」，1 起始）
+    this.replay = {
+      active: false,
+      cursor: 0,
+      moves: null,     // 回放来源棋谱；对局内指向 moveHistory
+      external: null,  // 非空 = 正在复盘历史旧局 { id, label, pvp, playerColor }
+      playing: false,
+      timer: null,
+      speed: 900
+    };
+
+    // 逐手分析缓存（仅内存态，避免污染 localStorage）
+    this.analysisCache = new Map(); // key: 'm#手数' | 'p#手数'
+    this.deepCache = new Map();     // key: 同上 → { text, model }
+    this.lastAnalysis = null;       // 当前展示的分析 { kind, scopeKey, moveNo, data, deep, deepError, deepLoading }
+    this.analyzing = false;
+    this.deepAnalyzing = false;
+    this.statusShowsReplay = false;
+
     // DOM 元素
     this.cacheElements();
 
@@ -35,6 +61,7 @@ class GomokuApp {
       showForbiddenMarks: this.settings.showForbiddenMarks
     });
     this.goban.onCellClick = (r, c) => this.handlePlayerClick(r, c);
+    this.goban.onCellInspect = (r, c) => this.handleInspectClick(r, c);
 
     // 绑定 UI 事件
     this.bindEvents();
@@ -65,6 +92,33 @@ class GomokuApp {
     this.btnHistory = document.getElementById('btnHistory');
     this.btnRules = document.getElementById('btnRules');
     this.btnSoundToggle = document.getElementById('btnSoundToggle');
+
+    // 工具栏：回放与分析入口
+    this.btnReplay = document.getElementById('btnReplay');
+    this.btnAnalyze = document.getElementById('btnAnalyze');
+
+    // 落子轨迹面板
+    this.replayCard = document.getElementById('replayCard');
+    this.replayTitle = document.getElementById('replayTitle');
+    this.replayCount = document.getElementById('replayCount');
+    this.replayHint = document.getElementById('replayHint');
+    this.btnRepFirst = document.getElementById('btnRepFirst');
+    this.btnRepPrev = document.getElementById('btnRepPrev');
+    this.btnRepPlay = document.getElementById('btnRepPlay');
+    this.btnRepNext = document.getElementById('btnRepNext');
+    this.btnRepLast = document.getElementById('btnRepLast');
+    this.repSpeed = document.getElementById('repSpeed');
+    this.repSlider = document.getElementById('repSlider');
+    this.moveListContainer = document.getElementById('moveListContainer');
+    this.btnRepExit = document.getElementById('btnRepExit');
+
+    // 棋局分析面板
+    this.analysisCard = document.getElementById('analysisCard');
+    this.analysisScope = document.getElementById('analysisScope');
+    this.btnAnalyzeMove = document.getElementById('btnAnalyzeMove');
+    this.btnAnalyzeNext = document.getElementById('btnAnalyzeNext');
+    this.btnAnalyzeDeep = document.getElementById('btnAnalyzeDeep');
+    this.analysisResult = document.getElementById('analysisResult');
 
     // 难度与引擎快捷选择
     this.difficultySelect = document.getElementById('difficultySelect');
@@ -138,6 +192,10 @@ class GomokuApp {
 
     // 设置弹窗内逻辑
     this.initSettingsModalEvents();
+
+    // 落子轨迹回放 + 逐手分析
+    this.bindReplayEvents();
+    this.bindAnalysisEvents();
 
     // 战绩清空
     document.getElementById('btnClearHistory')?.addEventListener('click', () => {
@@ -276,6 +334,9 @@ class GomokuApp {
     this.gameStatus = 'playing';
     this.turn = BLACK; // 黑方先手
 
+    // 复位回放视图与逐手分析缓存，避免残留上一局的状态
+    this.resetReplayState();
+
     if (this.isPvP()) {
       this.playerColor = BLACK;
       this.aiColor = null;
@@ -382,9 +443,18 @@ class GomokuApp {
   executeMove(r, c, color, comment = '') {
     this.board[r][c] = color;
     const notation = coordToNotation(r, c);
-    this.moveHistory.push({ r, c, color, notation, comment });
+    this.moveHistory.push({ r, c, color, notation, comment, t: Date.now() });
 
     sound.playPlaceStone();
+
+    this.stepCountEl.textContent = this.moveHistory.length;
+
+    // 刷新落子轨迹面板（不改动回放游标，复盘旧局时也能看到本局最新棋谱）
+    this.renderMoveList();
+    this.updateReplayUI();
+
+    // 回放/复盘视图下保持当前画面，等退出回放时由 restoreLiveView 重绘
+    if (this.replay.active) return;
 
     // 计算禁手标记
     const forbidden = this.turn === WHITE && this.settings.checkDoubleThree
@@ -393,8 +463,6 @@ class GomokuApp {
 
     this.goban.setBoardState(this.board, { r, c, color }, null, forbidden);
     this.goban.setTurn(color === BLACK ? WHITE : BLACK);
-
-    this.stepCountEl.textContent = this.moveHistory.length;
   }
 
   /**
@@ -475,7 +543,10 @@ class GomokuApp {
       this.winningLine = winResult.winLine;
       this.stopTimer();
       this.goban.setLocked(true);
-      this.goban.setBoardState(this.board, { r: lastR, c: lastC, color: lastColor }, winResult.winLine, []);
+
+      if (!this.replay.active) {
+        this.goban.setBoardState(this.board, { r: lastR, c: lastC, color: lastColor }, winResult.winLine, []);
+      }
 
       // 双人人人对战模式结算
       if (this.isPvP()) {
@@ -562,6 +633,14 @@ class GomokuApp {
    * 悔棋处理
    */
   handleUndo() {
+    if (this.replay.external) {
+      this.showToast('正在复盘历史对局，请先点「返回当前对局」再悔棋');
+      return;
+    }
+    if (this.replay.active) {
+      this.exitReplay({ silent: true });
+    }
+
     if (this.gameStatus !== 'playing') {
       this.showToast('对局未在进行中');
       return;
@@ -602,6 +681,9 @@ class GomokuApp {
     this.goban.setLocked(false);
 
     this.stepCountEl.textContent = this.moveHistory.length;
+    this.invalidateLiveAnalysis(this.moveHistory.length);
+    this.renderMoveList();
+    this.updateReplayUI();
     this.updateStatus();
     this.showToast(this.isPvP()
       ? `已撤销上一步，轮到【${this.turn === BLACK ? '黑方' : '白方'}】落子`
@@ -666,6 +748,11 @@ class GomokuApp {
    * 智能走法提示
    */
   handleHint() {
+    if (this.replay.active) {
+      this.showToast(this.replay.external ? '复盘历史对局中，请先返回当前对局' : '回放模式下不可取提示，请先返回当前对局');
+      return;
+    }
+
     if (this.gameStatus !== 'playing') {
       this.showToast('对局未在进行中');
       return;
@@ -688,6 +775,913 @@ class GomokuApp {
       this.goban.hoverPos = { r: best.r, c: best.c };
       this.goban.render();
     }
+  }
+
+  /* ======================================================================
+     落子轨迹与逐手回放
+     ====================================================================== */
+
+  /**
+   * 绑定回放面板与分析面板的全部交互
+   */
+  bindReplayEvents() {
+    this.btnReplay?.addEventListener('click', () => {
+      if (this.replay.active) {
+        this.exitReplay();
+        return;
+      }
+      if (!this.moveHistory.length) {
+        this.showToast('尚未落子，先下一手棋再回放吧');
+        return;
+      }
+      if (this.gameStatus === 'playing' && !this.isPvP() && this.turn !== this.playerColor) {
+        this.showToast('AI 正在落子，稍候再进入回放');
+        return;
+      }
+      this.startReview(this.moveHistory, null, this.moveHistory.length);
+      this.replayCard?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+
+    this.btnRepFirst?.addEventListener('click', () => this.gotoMove(1));
+    this.btnRepPrev?.addEventListener('click', () => this.stepReplay(-1));
+    this.btnRepNext?.addEventListener('click', () => this.stepReplay(1));
+    this.btnRepLast?.addEventListener('click', () => this.gotoMove(this.replayMoves().length));
+    this.btnRepPlay?.addEventListener('click', () => this.toggleAutoPlay());
+    this.btnRepExit?.addEventListener('click', () => this.exitReplay());
+
+    this.repSpeed?.addEventListener('change', (e) => {
+      this.replay.speed = Number(e.target.value) || 900;
+      if (this.replay.playing) {
+        this.stopAutoPlay();
+        this.toggleAutoPlay();
+      }
+    });
+
+    this.repSlider?.addEventListener('input', (e) => {
+      const no = Number(e.target.value) || 1;
+      if (!this.replay.active) {
+        if (!this.moveHistory.length) return;
+        this.startReview(this.moveHistory, null, no);
+      } else {
+        this.gotoMove(no);
+      }
+    });
+
+    // 棋谱列表：点行跳手，点放大镜直接分析那一手
+    this.moveListContainer?.addEventListener('click', (e) => {
+      const analyzeBtn = e.target.closest('[data-analyze]');
+      if (analyzeBtn) {
+        this.analyzeMoveNo(Number(analyzeBtn.dataset.analyze));
+        return;
+      }
+      const row = e.target.closest('.move-item');
+      if (!row) return;
+
+      const no = Number(row.dataset.idx);
+      if (!no) return;
+
+      if (!this.replay.active) {
+        if (!this.moveHistory.length) return;
+        this.startReview(this.moveHistory, null, no);
+      } else {
+        this.gotoMove(no);
+      }
+    });
+
+    // 键盘左右方向键逐手浏览
+    document.addEventListener('keydown', (e) => {
+      if (!this.replay.active) return;
+      const tag = (e.target && e.target.tagName) || '';
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
+      if (document.querySelector('.modal-overlay.active')) return;
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        this.stepReplay(-1);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        this.stepReplay(1);
+      } else if (e.key === 'Escape') {
+        this.exitReplay();
+      }
+    });
+
+    // 历史对局的「复盘」按钮
+    document.getElementById('historyListContainer')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-review]');
+      if (!btn) return;
+      this.openArchiveReview(Number(btn.dataset.review));
+    });
+  }
+
+  /**
+   * 回放中点击棋盘：跳到该棋子落下时的那一刻
+   */
+  handleInspectClick(r, c) {
+    const moves = this.replayMoves();
+    for (let i = 0; i < moves.length; i++) {
+      if (moves[i].r === r && moves[i].c === c) {
+        this.gotoMove(i + 1);
+        return;
+      }
+    }
+    this.showToast('回放模式：点击已有棋子可跳到那一手');
+  }
+
+  replayMoves() {
+    return this.replay.moves || this.moveHistory;
+  }
+
+  /**
+   * 进入回放视图（external 非空表示复盘历史旧局）
+   */
+  startReview(moves, external = null, cursor) {
+    if (!Array.isArray(moves) || moves.length === 0) {
+      this.showToast('该局没有可回放的棋谱');
+      return;
+    }
+    this.stopAutoPlay();
+    this.replay.active = true;
+    this.replay.moves = moves;
+    this.replay.external = external;
+    this.goban.setReviewMode(true);
+    this.goban.setLocked(true);
+    this.gotoMove(cursor === undefined ? moves.length : cursor);
+  }
+
+  /**
+   * 退出回放，回到当前对局的实时画面
+   */
+  exitReplay(opts = {}) {
+    const wasActive = this.replay.active;
+    this.stopAutoPlay();
+    this.replay.active = false;
+    this.replay.external = null;
+    this.replay.moves = null;
+    this.replay.cursor = 0;
+    this.goban.setReviewMode(false);
+    this.restoreLiveView();
+    this.renderMoveList();
+    this.updateReplayUI();
+    this.syncAnalysisToFocus();
+    if (wasActive && !opts.silent) {
+      this.showToast(this.gameStatus === 'playing' ? '已返回当前对局' : '已退出回放视图');
+    }
+  }
+
+  /**
+   * 复位回放与分析状态（新开一局时调用）
+   */
+  resetReplayState() {
+    this.stopAutoPlay();
+    this.replay.active = false;
+    this.replay.external = null;
+    this.replay.moves = null;
+    this.replay.cursor = 0;
+    this.goban.setReviewMode(false);
+    this.goban.setHighlight(null);
+    this.clearAnalysisCache('live');
+    this.lastAnalysis = null;
+    this.resetAnalysisPanel();
+    this.renderMoveList();
+    this.updateReplayUI();
+  }
+
+  gotoMove(rawIndex) {
+    if (!this.replay.active) return;
+
+    const moves = this.replayMoves();
+    const total = moves.length;
+    const idx = Math.max(1, Math.min(total, rawIndex));
+    this.replay.cursor = idx;
+
+    const board = buildBoardFromMoves(moves, idx);
+    const focus = moves[idx - 1];
+    const trail = moves.slice(Math.max(0, idx - 8), idx).map(m => ({ r: m.r, c: m.c, color: m.color }));
+
+    // 走到最后一手时，若该手确为制胜手，恢复五连高光
+    let winLine = null;
+    if (idx === total && focus) {
+      const probe = checkWin(board, focus.r, focus.c, focus.color);
+      if (probe.win) winLine = probe.winLine;
+    }
+
+    this.goban.setBoardState(
+      board,
+      focus ? { r: focus.r, c: focus.c, color: focus.color } : null,
+      winLine,
+      [],
+      trail
+    );
+    this.goban.setTurn(focus ? (focus.color === BLACK ? WHITE : BLACK) : BLACK);
+    this.goban.setHighlight(null);
+
+    this.renderMoveList();
+    this.updateReplayUI();
+    this.syncAnalysisToFocus();
+  }
+
+  stepReplay(delta) {
+    if (!this.replay.active) {
+      this.showToast('点「落子回放」或棋谱列表即可进入回放');
+      return;
+    }
+    const total = this.replayMoves().length;
+    const next = this.replay.cursor + delta;
+    if (next < 1) { this.showToast('已经是第一手了'); return; }
+    if (next > total) { this.showToast('已经是最后一手了'); return; }
+    this.gotoMove(next);
+  }
+
+  toggleAutoPlay() {
+    if (this.replay.playing) {
+      this.stopAutoPlay();
+      return;
+    }
+    const total = this.replayMoves().length;
+    if (!this.replay.active || total === 0) {
+      this.showToast('请先点「落子回放」进入回放视图');
+      return;
+    }
+    if (this.replay.cursor >= total) this.gotoMove(1);
+
+    this.replay.playing = true;
+    if (this.btnRepPlay) {
+      this.btnRepPlay.textContent = '暂停';
+      this.btnRepPlay.classList.add('playing');
+    }
+    this.replay.timer = setInterval(() => {
+      const len = this.replayMoves().length;
+      if (!this.replay.active) { this.stopAutoPlay(); return; }
+      if (this.replay.cursor >= len) { this.stopAutoPlay(); return; }
+      this.gotoMove(this.replay.cursor + 1);
+      if (this.replay.cursor >= len) this.stopAutoPlay();
+    }, this.replay.speed);
+  }
+
+  stopAutoPlay() {
+    if (this.replay.timer) {
+      clearInterval(this.replay.timer);
+      this.replay.timer = null;
+    }
+    this.replay.playing = false;
+    if (this.btnRepPlay) {
+      this.btnRepPlay.textContent = '播放';
+      this.btnRepPlay.classList.remove('playing');
+    }
+  }
+
+  /**
+   * 按当前对局真实状态重绘棋盘（退出回放时调用）
+   */
+  restoreLiveView() {
+    const last = this.moveHistory[this.moveHistory.length - 1] || null;
+    const showForbidden = this.gameStatus === 'playing' && this.turn === BLACK && this.settings.checkDoubleThree;
+    const forbidden = showForbidden ? this.calculateForbiddenPoints() : [];
+
+    this.goban.setBoardState(
+      this.board,
+      last ? { r: last.r, c: last.c, color: last.color } : null,
+      this.winningLine,
+      forbidden
+    );
+    this.goban.setTurn(this.turn);
+
+    const aiThinking = this.gameStatus === 'playing' && !this.isPvP() && this.turn !== this.playerColor;
+    this.goban.setLocked(this.gameStatus !== 'playing' || aiThinking);
+    this.updateStatus();
+  }
+
+  /**
+   * 更新回放面板与状态栏
+   */
+  updateReplayUI() {
+    const moves = this.replayMoves();
+    const total = moves.length;
+    const active = this.replay.active;
+    const cursor = active ? this.replay.cursor : total;
+
+    if (this.replayCount) {
+      this.replayCount.textContent = active ? `第 ${cursor} / ${total} 手` : `共 ${total} 手`;
+    }
+
+    if (this.replayTitle && this.replayHint) {
+      if (this.replay.external) {
+        this.replayTitle.textContent = '📜 历史复盘';
+        this.replayHint.textContent = `正在复盘「${this.replay.external.label}」，棋盘只读，可逐手查看与深度分析`;
+      } else if (active) {
+        this.replayTitle.textContent = '📜 落子轨迹';
+        this.replayHint.textContent = '回放中 · 棋盘暂停落子，点棋谱或棋盘上的棋子跳手，点「返回对局」继续';
+      } else {
+        this.replayTitle.textContent = '📜 落子轨迹';
+        this.replayHint.textContent = total
+          ? '点任意一手即可跳回当时盘面，或用播放条自动回放'
+          : '落子后这里会记录每一手的落点、顺序与用时';
+      }
+    }
+
+    if (this.repSlider) {
+      this.repSlider.max = Math.max(1, total);
+      this.repSlider.value = Math.max(1, cursor);
+      this.repSlider.disabled = total === 0;
+    }
+
+    const canStep = active && total > 0;
+    if (this.btnRepFirst) this.btnRepFirst.disabled = !canStep || cursor <= 1;
+    if (this.btnRepPrev) this.btnRepPrev.disabled = !canStep || cursor <= 1;
+    if (this.btnRepNext) this.btnRepNext.disabled = !canStep || cursor >= total;
+    if (this.btnRepLast) this.btnRepLast.disabled = !canStep || cursor >= total;
+    if (this.btnRepPlay) this.btnRepPlay.disabled = !canStep;
+    if (this.btnRepExit) this.btnRepExit.hidden = !active;
+
+    if (this.btnReplay) {
+      this.btnReplay.innerHTML = active
+        ? '<span class="btn-icon-text">⏹</span> 退出回放'
+        : '<span class="btn-icon-text">⏪</span> 落子回放';
+    }
+
+    if (this.analysisScope) {
+      this.analysisScope.textContent = total === 0
+        ? '暂无落子'
+        : `焦点：第 ${cursor} 手`;
+    }
+
+    if (this.btnAnalyzeDeep) {
+      const hasDeep = total > 0 && this.deepCache.has(this.scopeKey('m', cursor));
+      this.btnAnalyzeDeep.disabled = total === 0;
+      this.btnAnalyzeDeep.textContent = hasDeep ? '🧠 已解读，点击再看' : '🧠 深度解读';
+    }
+
+    // 状态栏：回放时改为显示当前焦点手
+    if (active && this.statusTextEl && this.turnBadgeEl) {
+      const focus = moves[cursor - 1];
+      this.turnBadgeEl.className = `turn-badge ${focus && focus.color === WHITE ? 'turn-white' : 'turn-black'}`;
+      this.turnBadgeEl.textContent = this.replay.external ? '复盘浏览' : '回放浏览';
+      this.statusTextEl.textContent = focus
+        ? `第 ${cursor} 手：${COLOR_NAMES[focus.color]} ${focus.notation || coordToNotation(focus.r, focus.c)}`
+        : '回放起点 · 空盘';
+      this.statusShowsReplay = true;
+    } else if (this.statusShowsReplay) {
+      this.statusShowsReplay = false;
+      this.updateStatus();
+    }
+  }
+
+  /**
+   * 渲染棋谱列表
+   */
+  renderMoveList() {
+    const container = this.moveListContainer;
+    if (!container) return;
+
+    const moves = this.replayMoves();
+    if (!moves.length) {
+      container.innerHTML = '<div class="empty-hint">本局还没有落子，去棋盘上点一手吧</div>';
+      return;
+    }
+
+    const activeNo = this.replay.active ? this.replay.cursor : moves.length;
+
+    container.innerHTML = moves.map((m, i) => {
+      const no = i + 1;
+      const coord = m.notation || coordToNotation(m.r, m.c);
+      const cached = this.analysisCache.get(this.scopeKey('m', no));
+      const gradeHtml = cached
+        ? `<span class="move-grade tone-${cached.tone}">${cached.gradeLabel}</span>`
+        : '';
+      const timeHtml = this.moveTimeText(moves, i);
+
+      return `<div class="move-item${no === activeNo ? ' active' : ''}" data-idx="${no}" title="跳到第 ${no} 手">
+        <span class="move-no">${no}</span>
+        <span class="stone-dot ${m.color === BLACK ? 'black' : 'white'}"></span>
+        <span class="move-coord">${coord}</span>
+        <span class="move-owner">${this.moveOwnerLabel(m.color)}</span>
+        ${gradeHtml}
+        <span class="move-time">${timeHtml}</span>
+        <button class="move-analyze" data-analyze="${no}" title="分析这一手">🔍</button>
+      </div>`;
+    }).join('');
+
+    if (this.replay.active) {
+      const activeEl = container.querySelector('.move-item.active');
+      if (activeEl) {
+        container.scrollTop = Math.max(
+          0,
+          activeEl.offsetTop - container.clientHeight / 2 + activeEl.offsetHeight / 2
+        );
+      }
+    }
+  }
+
+  /**
+   * 某一手的落子归属（你 / AI / 黑 / 白）
+   */
+  moveOwnerLabel(color) {
+    if (this.replay.external) {
+      if (this.replay.external.pvp) return color === BLACK ? '黑' : '白';
+      return color === this.replay.external.playerColor ? '你' : 'AI';
+    }
+    if (this.isPvP()) return color === BLACK ? '黑' : '白';
+    return color === this.playerColor ? '你' : 'AI';
+  }
+
+  /**
+   * 单手用时（相对上一手的间隔）
+   */
+  moveTimeText(moves, i) {
+    const cur = moves[i].t;
+    const prev = i > 0 ? moves[i - 1].t : (this.replay.external ? null : this.startTime);
+    if (!cur || !prev) return '';
+    const sec = Math.max(0, Math.round((cur - prev) / 1000));
+    if (sec >= 60) {
+      return `${Math.floor(sec / 60)}′${String(sec % 60).padStart(2, '0')}″`;
+    }
+    return `${sec}s`;
+  }
+
+  /* ======================================================================
+     逐手分析与后续推演
+     ====================================================================== */
+
+  bindAnalysisEvents() {
+    this.btnAnalyze?.addEventListener('click', () => {
+      if (!this.replayMoves().length) {
+        this.showToast('请先落一手棋再分析');
+        return;
+      }
+      this.analysisCard?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      this.runMoveAnalysis();
+    });
+    this.btnAnalyzeMove?.addEventListener('click', () => this.runMoveAnalysis());
+    this.btnAnalyzeNext?.addEventListener('click', () => this.runPositionAnalysis());
+    this.btnAnalyzeDeep?.addEventListener('click', () => this.runDeepAnalysis());
+
+    // 分析结果里的推荐点：点击即在棋盘上高亮标注
+    this.analysisResult?.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-point]');
+      if (!row) return;
+      const r = Number(row.dataset.r);
+      const c = Number(row.dataset.c);
+      if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+      this.goban.setHighlight({ r, c });
+      this.showToast(`💡 引擎推荐点 ${row.dataset.point} 已在棋盘上标出`);
+    });
+  }
+
+  /**
+   * 当前焦点那一手的编号（1 起始，0 = 无）
+   */
+  focusMoveNo() {
+    const moves = this.replayMoves();
+    if (!moves.length) return 0;
+    return this.replay.active ? this.replay.cursor : moves.length;
+  }
+
+  /**
+   * 分析结果缓存键：区分「本手质量 / 局面推演」与「当前对局 / 某局历史」
+   */
+  scopeKey(kind, no) {
+    const tag = this.replay.external ? `g${this.replay.external.id}` : 'live';
+    return `${tag}-${kind}${no}`;
+  }
+
+  clearAnalysisCache(tag = 'live') {
+    const prefix = `${tag}-`;
+    for (const key of [...this.analysisCache.keys()]) {
+      if (key.startsWith(prefix)) this.analysisCache.delete(key);
+    }
+    for (const key of [...this.deepCache.keys()]) {
+      if (key.startsWith(prefix)) this.deepCache.delete(key);
+    }
+  }
+
+  /**
+   * 悔棋后作废被撤销那几手的分析
+   */
+  invalidateLiveAnalysis(keepMoves) {
+    const drop = [];
+    for (const key of this.analysisCache.keys()) {
+      if (!key.startsWith('live-')) continue;
+      const no = Number(key.replace('live-', '').replace(/^[mp]/, ''));
+      if (no > keepMoves) drop.push(key);
+    }
+    drop.forEach(k => {
+      this.analysisCache.delete(k);
+      this.deepCache.delete(k);
+    });
+    if (this.lastAnalysis && drop.includes(this.lastAnalysis.scopeKey)) {
+      this.lastAnalysis = null;
+      this.resetAnalysisPanel();
+    }
+  }
+
+  /**
+   * 跳手时自动回显该手已有的分析结论
+   */
+  syncAnalysisToFocus() {
+    const no = this.focusMoveNo();
+    if (!no) {
+      this.lastAnalysis = null;
+      this.resetAnalysisPanel();
+      return;
+    }
+    const mk = this.scopeKey('m', no);
+    const pk = this.scopeKey('p', no);
+    if (this.lastAnalysis && (this.lastAnalysis.scopeKey === mk || this.lastAnalysis.scopeKey === pk)) return;
+
+    if (this.analysisCache.has(mk)) {
+      this.lastAnalysis = { kind: 'move', scopeKey: mk, moveNo: no, data: this.analysisCache.get(mk), deep: this.deepCache.get(mk) || null };
+      this.renderAnalysis();
+    } else if (this.analysisCache.has(pk)) {
+      this.lastAnalysis = { kind: 'position', scopeKey: pk, moveNo: no, data: this.analysisCache.get(pk), deep: this.deepCache.get(pk) || null };
+      this.renderAnalysis();
+    } else {
+      // 换手后不沿用上一手的结论，避免误读
+      this.lastAnalysis = null;
+      this.showUnanalyzedHint(no);
+    }
+  }
+
+  showUnanalyzedHint(no) {
+    if (this.analysisResult) {
+      this.analysisResult.innerHTML = `<div class="empty-hint">第 ${no} 手尚未分析，点下方「分析本手」查看棋形评分与更优下法。</div>`;
+    }
+  }
+
+  /**
+   * 点击棋谱里的 🔍 或直接指定某一手进行分析
+   */
+  analyzeMoveNo(no) {
+    if (!no) return;
+    const moves = this.replayMoves();
+    if (!moves.length) return;
+
+    if (!this.replay.active) {
+      this.startReview(this.moveHistory, null, no);
+    } else if (this.replay.cursor !== no) {
+      this.gotoMove(no);
+    }
+    this.runMoveAnalysis();
+  }
+
+  async runMoveAnalysis() {
+    if (this.analyzing) return;
+    const moves = this.replayMoves();
+    const no = this.focusMoveNo();
+    if (!no) {
+      this.showToast('请先落一手棋再分析');
+      return;
+    }
+
+    const key = this.scopeKey('m', no);
+    if (this.analysisCache.has(key)) {
+      this.lastAnalysis = {
+        kind: 'move',
+        scopeKey: key,
+        moveNo: no,
+        data: this.analysisCache.get(key),
+        deep: this.deepCache.get(key) || null
+      };
+      this.renderAnalysis();
+      return;
+    }
+
+    this.analyzing = true;
+    this.setAnalysisLoading(`本地引擎正在核算第 ${no} 手的棋形与替代下法…`);
+    await new Promise(res => setTimeout(res, 20)); // 先让 loading 上屏
+
+    try {
+      const res = analyzeMove(moves, no - 1, {
+        checkBlackForbidden: this.settings.checkDoubleThree
+      });
+      if (!res) {
+        this.renderAnalysisError('这一手记录不完整，无法分析');
+        return;
+      }
+      this.analysisCache.set(key, res);
+      this.lastAnalysis = { kind: 'move', scopeKey: key, moveNo: no, data: res, deep: this.deepCache.get(key) || null };
+      this.renderAnalysis();
+      this.renderMoveList();
+      this.updateReplayUI();
+    } catch (err) {
+      console.error('分析失败:', err);
+      this.renderAnalysisError(`分析失败：${err.message || err}`);
+    } finally {
+      this.analyzing = false;
+    }
+  }
+
+  async runPositionAnalysis() {
+    if (this.analyzing) return;
+    const moves = this.replayMoves();
+    const no = this.focusMoveNo();
+    if (!no) {
+      this.showToast('请先落一手棋再推演');
+      return;
+    }
+
+    const key = this.scopeKey('p', no);
+    if (this.analysisCache.has(key)) {
+      this.lastAnalysis = {
+        kind: 'position',
+        scopeKey: key,
+        moveNo: no,
+        data: this.analysisCache.get(key),
+        deep: this.deepCache.get(key) || null
+      };
+      this.renderAnalysis();
+      return;
+    }
+
+    this.analyzing = true;
+    this.setAnalysisLoading('正在推演后续三手的变化分支…');
+    await new Promise(res => setTimeout(res, 20));
+
+    try {
+      const res = analyzePosition(moves, no, {
+        checkBlackForbidden: this.settings.checkDoubleThree
+      });
+      this.analysisCache.set(key, res);
+      this.lastAnalysis = { kind: 'position', scopeKey: key, moveNo: no, data: res, deep: this.deepCache.get(key) || null };
+      this.renderAnalysis();
+    } catch (err) {
+      console.error('推演失败:', err);
+      this.renderAnalysisError(`推演失败：${err.message || err}`);
+    } finally {
+      this.analyzing = false;
+    }
+  }
+
+  /**
+   * 大模型深度解读（本地结论 + ASCII 棋盘图 → 教练口吻棋评）
+   */
+  async runDeepAnalysis() {
+    if (this.deepAnalyzing) return;
+    const moves = this.replayMoves();
+    const no = this.focusMoveNo();
+    if (!no) {
+      this.showToast('请先落一手棋再解读');
+      return;
+    }
+
+    // 沿用当前展示的分析；没有则先算一次本手分析作为依据
+    let base = this.lastAnalysis && this.lastAnalysis.moveNo === no
+      ? this.lastAnalysis
+      : null;
+
+    if (base && base.deep) {
+      return; // 已展示解读内容
+    }
+
+    if (!base) {
+      const key = this.scopeKey('m', no);
+      let data = this.analysisCache.get(key);
+      if (!data) {
+        data = analyzeMove(moves, no - 1, { checkBlackForbidden: this.settings.checkDoubleThree });
+        if (data) this.analysisCache.set(key, data);
+      }
+      if (!data) {
+        this.renderAnalysisError('未能取得本地分析结论，无法请大模型解读');
+        return;
+      }
+      base = { kind: 'move', scopeKey: key, moveNo: no, data, deep: this.deepCache.get(key) || null };
+      this.lastAnalysis = base;
+      this.renderAnalysis();
+    }
+
+    if (base.deep) return;
+
+    const focusMove = moves[no - 1];
+    const board = buildBoardFromMoves(moves, no);
+    const lastMove = base.kind === 'move' ? focusMove : null;
+
+    this.deepAnalyzing = true;
+    this.lastAnalysis = { ...base, deepLoading: true, deepError: null };
+    this.renderAnalysis();
+
+    const focusText = base.kind === 'move'
+      ? `第 ${no} 手（本局共 ${moves.length} 手）：${COLOR_NAMES[base.data.color]}方落于 ${base.data.notation}，本地引擎定级「${base.data.gradeLabel}」`
+      : `第 ${no} 手落子之后，轮到${COLOR_NAMES[base.data.toMove]}方行棋（本局共 ${moves.length} 手）`;
+
+    const res = await requestDeepAnalysis(this.settings.llmConfig, {
+      boardAscii: renderBoardAscii(board, lastMove),
+      historyText: this.historyTextForLLM(moves, no),
+      focusText,
+      localReport: formatAnalysisForLLM(base.data),
+      ruleText: this.settings.checkDoubleThree
+        ? '规则：15×15 棋盘，黑棋先行；黑棋受三三禁手限制（不可同时形成两个及以上活三），白棋无禁手。'
+        : '规则：15×15 棋盘，黑棋先行，无禁手限制。'
+    });
+
+    this.deepAnalyzing = false;
+
+    if (res.ok) {
+      this.deepCache.set(base.scopeKey, { text: res.text, model: res.model });
+      this.lastAnalysis = { ...this.lastAnalysis, deepLoading: false, deep: { text: res.text, model: res.model }, deepError: null };
+    } else {
+      this.lastAnalysis = { ...this.lastAnalysis, deepLoading: false, deep: null, deepError: res.error || '大模型解读失败' };
+    }
+    this.renderAnalysis();
+    this.updateReplayUI();
+  }
+
+  /**
+   * 供大模型阅读的棋谱文本（最近 14 手）
+   */
+  historyTextForLLM(moves, no) {
+    const slice = moves.slice(0, no);
+    const from = Math.max(0, slice.length - 14);
+    const text = slice.slice(from).map((m, i) => {
+      const idx = from + i + 1;
+      const coord = m.notation || coordToNotation(m.r, m.c);
+      return `第${idx}手 ${COLOR_NAMES[m.color] || '?'} ${coord}`;
+    }).join('；');
+    return text || '（尚无落子）';
+  }
+
+  /* ---------- 分析结果渲染 ---------- */
+
+  resetAnalysisPanel() {
+    if (this.analysisResult) {
+      this.analysisResult.innerHTML = '<div class="empty-hint">尚未分析。可在上方棋谱点选某一手，再按「分析本手」查看棋形评分、是否最优与更推荐的下法。</div>';
+    }
+  }
+
+  setAnalysisLoading(msg) {
+    if (this.analysisResult) {
+      this.analysisResult.innerHTML = `<div class="an-loading">⏳ ${this.esc(msg)}</div>`;
+    }
+  }
+
+  renderAnalysisError(msg) {
+    if (this.analysisResult) {
+      this.analysisResult.innerHTML = `<div class="an-error">${this.esc(msg)}</div>`;
+    }
+  }
+
+  renderAnalysis() {
+    const state = this.lastAnalysis;
+    if (!state || !this.analysisResult) return;
+
+    const body = state.kind === 'move'
+      ? this.moveAnalysisHtml(state.data)
+      : this.positionAnalysisHtml(state.data);
+
+    this.analysisResult.innerHTML = body + this.deepHtml(state);
+  }
+
+  moveAnalysisHtml(res) {
+    const owner = this.moveOwnerLabel(res.color);
+    const parts = [];
+
+    parts.push(`<div class="an-head">
+      <span class="grade-badge tone-${res.tone}">${res.gradeLabel}</span>
+      <span class="an-title">第 ${res.moveNo} 手 · ${COLOR_NAMES[res.color]}方（${owner}）· ${res.notation}</span>
+    </div>`);
+
+    parts.push(`<div class="score-row">
+      <div class="score-box"><b>${this.fmtNum(res.myScore)}</b><span>本手评分</span></div>
+      <div class="score-box"><b>${this.fmtNum(res.bestScore)}</b><span>引擎最佳</span></div>
+      <div class="score-box tone-${res.tone}"><b>${res.matchRate}%</b><span>最优匹配度</span></div>
+    </div>`);
+
+    if (res.notes.length) {
+      parts.push(`<ul class="an-list">${res.notes.map(n => `<li class="${this.noteClass(n)}">${this.esc(n)}</li>`).join('')}</ul>`);
+    }
+
+    if (res.alternatives.length) {
+      parts.push(`<div class="an-sub">更优下法（点一行可在棋盘上标出该点）</div>`);
+      parts.push(`<table class="alt-table"><thead><tr><th>点位</th><th>评分</th><th>落子后棋形</th></tr></thead><tbody>
+        ${res.alternatives.map(a => `<tr class="alt-row" data-point="${a.notation}" data-r="${a.r}" data-c="${a.c}">
+          <td>${a.notation}</td><td>${this.fmtNum(Math.round(a.score))}</td><td>${this.esc(a.shapes.join('、') || '—')}</td>
+        </tr>`).join('')}
+      </tbody></table>`);
+    }
+
+    parts.push(this.linesHtml(res.lines, '本手之后最可能的三手变化（已考虑对手最强抵抗）'));
+    return parts.join('');
+  }
+
+  positionAnalysisHtml(res) {
+    const parts = [];
+    parts.push(`<div class="an-head">
+      <span class="grade-badge tone-good">局面推演</span>
+      <span class="an-title">第 ${res.moveNo} 手之后 · 轮到${COLOR_NAMES[res.toMove]}方</span>
+    </div>`);
+
+    if (res.candidates.length) {
+      parts.push('<div class="an-sub">引擎推荐点</div>');
+      parts.push(`<table class="alt-table"><thead><tr><th>点位</th><th>评分</th><th>落子后棋形</th></tr></thead><tbody>
+        ${res.candidates.map(c => `<tr class="alt-row" data-point="${c.notation}" data-r="${c.r}" data-c="${c.c}">
+          <td>${c.notation}</td><td>${this.fmtNum(Math.round(c.score))}</td><td>${this.esc(c.shapes.join('、') || '—')}</td>
+        </tr>`).join('')}
+      </tbody></table>`);
+    }
+
+    if (res.notes.length) {
+      parts.push(`<ul class="an-list">${res.notes.map(n => `<li class="${this.noteClass(n)}">${this.esc(n)}</li>`).join('')}</ul>`);
+    }
+
+    parts.push(this.linesHtml(res.lines, '接下来三手最可能的走向（对手最强抵抗下）'));
+    return parts.join('');
+  }
+
+  linesHtml(lines, title) {
+    if (!lines || !lines.length) return '';
+    const items = lines.map((l, i) => {
+      let cls = '';
+      if (l.result && l.result.indexOf('连五致胜') >= 0) {
+        cls = l.result.indexOf(COLOR_NAMES[l.rootColor]) === 0 ? 'line-win' : 'line-lose';
+      }
+      const note = l.result
+        ? l.result
+        : `局面参考分 ${l.refScore > 0 ? '+' : ''}${this.fmtNum(l.refScore)}`;
+      return `<li class="line-item ${cls}">
+        <span class="line-seq">${i + 1}. ${this.esc(l.text)}</span>
+        <span class="line-note">${this.esc(note)}</span>
+      </li>`;
+    }).join('');
+    return `<div class="an-sub">${title}</div><ul class="line-list">${items}</ul>`;
+  }
+
+  deepHtml(state) {
+    if (state.deepLoading) {
+      return '<div class="an-loading">🧠 大模型正在通读棋局撰写棋评，通常需要几秒…</div>';
+    }
+    if (state.deep) {
+      return `<div class="an-sub">🧠 大模型深度解读 · ${this.esc(state.deep.model || '')}</div>
+        <div class="an-llm">${this.llmHtml(state.deep.text)}</div>`;
+    }
+    if (state.deepError) {
+      return `<div class="an-sub">🧠 大模型深度解读</div><div class="an-error">${this.esc(state.deepError)}</div>`;
+    }
+    return '';
+  }
+
+  /* ---------- 小工具 ---------- */
+
+  noteClass(text) {
+    if (/漏防|错失|杀机|禁手|危险|必须|未处理|不可落子|无法/.test(text)) return 'danger';
+    if (/更推荐|注意|埋伏笔|对方下一手|主动权在对方/.test(text)) return 'warn';
+    return '';
+  }
+
+  fmtNum(num) {
+    const n = Number(num);
+    if (!Number.isFinite(n)) return '—';
+    return Math.round(n).toLocaleString('en-US');
+  }
+
+  esc(str) {
+    return String(str === null || str === undefined ? '' : str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  llmHtml(text) {
+    return this.esc(text)
+      .replace(/【([^】]{2,16})】/g, '<span class="llm-sec">【$1】</span>')
+      .replace(/\n/g, '<br>');
+  }
+
+  /**
+   * 载入历史对局棋谱进行复盘
+   */
+  openArchiveReview(id) {
+    const game = StorageManager.getHistory().find(g => g.id === id);
+    if (!game) {
+      this.showToast('找不到该局对局记录');
+      return;
+    }
+    if (!Array.isArray(game.moves) || game.moves.length === 0) {
+      this.showToast('该局未保存完整棋谱（旧版本记录），无法复盘');
+      return;
+    }
+
+    const moves = game.moves
+      .filter(m => m && Number.isFinite(m.r) && Number.isFinite(m.c) && m.color)
+      .map(m => ({ ...m, notation: m.notation || coordToNotation(m.r, m.c) }));
+
+    if (!moves.length) {
+      this.showToast('该局棋谱数据异常，无法回放');
+      return;
+    }
+
+    const external = {
+      id: game.id,
+      label: `${game.date || '历史对局'} · ${game.turns || moves.length} 手`,
+      pvp: /双人/.test(String(game.aiMode || '')),
+      playerColor: /^白/.test(String(game.playerColor || '')) ? WHITE : BLACK
+    };
+
+    this.startReview(moves, external, moves.length);
+    this.historyModal.classList.remove('active');
+    this.showToast(`已载入 ${external.label} 的棋谱，可逐手回放与分析`);
+    setTimeout(() => {
+      this.replayCard?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 120);
   }
 
   /**
@@ -1056,6 +2050,8 @@ class GomokuApp {
       const badgeClass = isWin ? 'win' : isDraw ? 'draw' : 'lose';
       const badgeText = isWin ? '获胜' : isDraw ? '平局' : '惜败';
 
+      const canReview = Array.isArray(item.moves) && item.moves.length > 0;
+
       return `
         <div class="history-item">
           <div class="history-left">
@@ -1068,6 +2064,9 @@ class GomokuApp {
           <div class="history-right">
             <span class="history-steps">${item.turns} 步</span>
             <span class="history-time">${item.duration}</span>
+            ${canReview
+              ? `<button class="btn-review" data-review="${item.id}">🔍 复盘此局</button>`
+              : '<span class="btn-review disabled" title="该局未保存完整棋谱，无法回放">无棋谱</span>'}
           </div>
         </div>
       `;

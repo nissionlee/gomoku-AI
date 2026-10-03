@@ -273,3 +273,116 @@ export async function testLLMConnection(config) {
     return { success: false, message: `网络错误：${err.message || '跨域限制或无法访问该地址'}` };
   }
 }
+
+/**
+ * 将 15x15 局面渲染为 ASCII 文本（大模型对棋盘坐标感知弱，需文字化棋谱）
+ * @param {number[][]} board
+ * @param {{r:number,c:number}|null} lastMove 最近一手，用 ★/☆ 突出显示
+ */
+export function renderBoardAscii(board, lastMove = null) {
+  const header = '     A B C D E F G H I J K L M N O';
+  const rows = [header];
+
+  for (let r = 0; r < 15; r++) {
+    const cells = [];
+    for (let c = 0; c < 15; c++) {
+      const v = board[r][c];
+      const isLast = !!(lastMove && lastMove.r === r && lastMove.c === c);
+      if (isLast) {
+        cells.push(v === 1 ? '★' : '☆');
+      } else {
+        cells.push(v === 1 ? '●' : (v === 2 ? '○' : '.'));
+      }
+    }
+    rows.push(`${String(15 - r).padStart(2)}  ${cells.join(' ')}`);
+  }
+
+  return ['图例：● = 黑子，○ = 白子，. = 空点，★/☆ = 本次评价焦点的那一手', '']
+    .concat(rows)
+    .join('\n');
+}
+
+/**
+ * 大模型深度棋评
+ * @param {Object} config { baseUrl, apiKey, model, persona }
+ * @param {Object} context
+ *   { boardAscii, historyText, focusText, localReport, colorName, ruleText }
+ * @returns {Promise<{ok:boolean, text?:string, model?:string, error?:string}>}
+ */
+export async function requestDeepAnalysis(config, context) {
+  if (!config.apiKey || !config.apiKey.trim()) {
+    return { ok: false, error: '尚未配置大模型 API Key，请先在「设置」中填写 DeepSeek / Gemini 等密钥' };
+  }
+
+  let cleanBaseUrl = (config.baseUrl || '').trim().replace(/\/+$/, '');
+  if (!cleanBaseUrl) cleanBaseUrl = PROVIDER_PRESETS.deepseek.baseUrl;
+  const endpoint = `${cleanBaseUrl}/chat/completions`;
+
+  const systemPrompt = `你是一位职业五子棋（连珠）教练兼棋局分析引擎，负责为业余棋手做逐手复盘。
+你会收到：文字棋盘图、棋谱、以及本地战术引擎预先算出的量化结论（评分、棋形、变化推演）。
+请以引擎结论为依据作专业解读，不要自行编造坐标；引用坐标时必须使用棋盘图上真实存在的记法（例如 H8、I9）。
+${context.ruleText || ''}
+
+输出格式要求（严格遵守）：
+- 使用中文纯文本，总字数 180~320 字；
+- 分成三到四个小节，每节以方括号标题开头，依次为：【本手定性】、【局势判断】、【后续变化】、【改进建议】；
+- 【后续变化】里逐条列出接下来三手（下一步、下下一步、下下下一步）最可能的应对顺序；
+- 不要输出 JSON，不要使用 Markdown 代码块标记（如 \`\`\`），不要重复罗列评分数字。`;
+
+  const userPrompt = `【当前棋盘】
+${context.boardAscii}
+
+【棋谱（最近若干手）】
+${context.historyText}
+
+【本次评价对象】
+${context.focusText}
+
+【本地引擎量化结论】
+${context.localReport}
+
+请按要求的四个小节输出棋评。`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey.trim()}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: config.model || 'deepseek-chat',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.5,
+        max_tokens: 700
+      })
+    });
+
+    if (!response.ok) {
+      const errText = (await response.text()).slice(0, 160);
+      return { ok: false, error: `接口返回 ${response.status}：${errText}` };
+    }
+
+    const data = await response.json();
+    let text = data.choices?.[0]?.message?.content || '';
+    text = text.replace(/```(?:\w+)?/gi, '').replace(/```/g, '').trim();
+
+    if (!text) {
+      return { ok: false, error: '模型返回内容为空，请稍后重试或更换模型' };
+    }
+
+    return { ok: true, text, model: config.model || 'deepseek-chat' };
+  } catch (err) {
+    const msg = err.name === 'AbortError' ? '请求超时（30 秒），请稍后重试' : (err.message || '网络错误或跨域受限');
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}

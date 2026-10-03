@@ -122,6 +122,12 @@
           <button id="btnHint" class="btn btn-info" title="AI 为你提示当前最优落子点">
             <span class="btn-icon-text">💡</span> 走法提示
           </button>
+          <button id="btnReplay" class="btn btn-secondary" title="进入/退出落子轨迹回放">
+            <span class="btn-icon-text">⏪</span> 落子回放
+          </button>
+          <button id="btnAnalyze" class="btn btn-info" title="分析当前焦点那一手的棋形与优劣">
+            <span class="btn-icon-text">🔍</span> 分析本手
+          </button>
           <button id="btnResign" class="btn btn-danger" title="主动认输">
             <span class="btn-icon-text">🏳️</span> 认输
           </button>
@@ -153,12 +159,60 @@
           </div>
         </div>
 
+        <!-- 落子轨迹与逐手回放 -->
+        <div class="panel-card replay-card" id="replayCard">
+          <div class="card-head">
+            <h4 id="replayTitle">📜 落子轨迹</h4>
+            <span class="head-badge" id="replayCount">0 手</span>
+          </div>
+          <p class="card-hint" id="replayHint">点击任意一手即可跳回当时的盘面</p>
+
+          <div class="play-bar">
+            <button id="btnRepFirst" class="btn-step" title="回到第 1 手">⏮</button>
+            <button id="btnRepPrev" class="btn-step" title="上一手（键盘 ←）">◀</button>
+            <button id="btnRepPlay" class="btn-step btn-step-play" title="自动播放棋谱">播放</button>
+            <button id="btnRepNext" class="btn-step" title="下一手（键盘 →）">▶</button>
+            <button id="btnRepLast" class="btn-step" title="跳到最新一手">⏭</button>
+            <select id="repSpeed" class="form-select-sm rep-speed" title="自动播放速度">
+              <option value="1500">慢</option>
+              <option value="900" selected>常</option>
+              <option value="450">快</option>
+            </select>
+          </div>
+
+          <input type="range" id="repSlider" class="rep-slider" min="1" max="1" step="1" value="1" aria-label="回放进度">
+
+          <div id="moveListContainer" class="move-list"></div>
+
+          <button id="btnRepExit" class="btn btn-warning btn-block btn-sm" hidden>↩️ 返回当前对局</button>
+        </div>
+
+        <!-- 逐手 AI 分析 -->
+        <div class="panel-card analysis-card" id="analysisCard">
+          <div class="card-head">
+            <h4>🔍 棋局分析</h4>
+            <span class="head-badge" id="analysisScope">最新一手</span>
+          </div>
+          <p class="card-hint">本地引擎逐手定量评估，还可让大模型展开讲棋</p>
+
+          <div class="analysis-actions">
+            <button id="btnAnalyzeMove" class="btn btn-info btn-sm">🔍 分析本手</button>
+            <button id="btnAnalyzeNext" class="btn btn-secondary btn-sm" title="推演接下来三手最可能的变化">📊 推演三手</button>
+            <button id="btnAnalyzeDeep" class="btn btn-ghost btn-sm" title="调用已配置的大模型展开教练式讲解">🧠 深度解读</button>
+          </div>
+
+          <div id="analysisResult" class="analysis-result">
+            <div class="empty-hint">尚未分析。可在上方棋谱点选某一手，再按「分析本手」查看棋形评分、是否最优与更推荐的下法。</div>
+          </div>
+        </div>
+
         <!-- 快速功能指南 -->
         <div class="panel-card tips-card">
           <h4>💡 下棋小贴士</h4>
           <ul class="tips-list">
             <li><strong>先手禁手：</strong>执黑先行存在三三禁手规则，形成两个活三将被判定违规。</li>
             <li><strong>悔棋功能：</strong>点击“悔棋”即可退回上一步，方便深思复盘。</li>
+            <li><strong>逐手复盘：</strong>“落子轨迹”可回放任意一手并自动连线显示落子顺序，“棋局分析”则给出该手评分、是否最优与更推荐下法；旧对局在“战绩记录”里点“复盘”同样可查。</li>
             <li><strong>大模型对战：</strong>可在“设置”中填入 DeepSeek、Gemini、通义千问等 API Key，开启智能人设立体对弈！</li>
             <li><strong>云端免费部署：</strong>静态无缝托管于 Cloudflare Pages，手机电脑皆可畅玩。</li>
           </ul>

@@ -3,7 +3,7 @@
  * 具备：拟真天然木纹底色、立体玉质黑白棋子、落子高亮标记、胜利连线光效、悬浮虚影预览
  */
 
-import { BOARD_SIZE, EMPTY, BLACK, WHITE } from './rules.js';
+import { BOARD_SIZE, EMPTY, BLACK, WHITE, inBoard } from './rules.js';
 
 export class Goban {
   /**
@@ -24,10 +24,14 @@ export class Goban {
     this.hoverPos = null;        // { r, c }
     this.winningLine = null;     // Array<[r, c]>
     this.forbiddenPoints = [];   // Array<{ r, c }>
+    this.trail = [];             // 回放轨迹 Array<{ r, c, color }>
     this.turnColor = BLACK;
     this.isLocked = false;       // AI 思考或游戏结束时锁定
+    this.reviewOnly = false;     // 回放只读模式：点击棋子用于跳手而非落子
+    this.highlight = null;       // 分析推荐点 { r, c }
 
     this.onCellClick = null;     // 回调 (r, c)
+    this.onCellInspect = null;   // 回调 (r, c)，仅回放模式生效
 
     this.initEvents();
     this.resize();
@@ -79,7 +83,7 @@ export class Goban {
 
     // 鼠标悬停预览 (桌面端)
     this.canvas.addEventListener('mousemove', (e) => {
-      if (this.isLocked) return;
+      if (this.isLocked || this.reviewOnly) return;
       const pos = getPosFromEvent(e);
       if (!this.hoverPos || !pos || this.hoverPos.r !== pos.r || this.hoverPos.c !== pos.c) {
         this.hoverPos = pos;
@@ -124,12 +128,11 @@ export class Goban {
       this.hoverPos = null;
       // 若用户在滑动翻看网页下方内容，直接返回，不阻止滚动也不落子
       if (isTouchSwiping) return;
-      if (this.isLocked) return;
 
       const pos = getPosFromEvent(e);
-      if (pos && this.onCellClick) {
+      if (pos) {
         lastTouchTime = Date.now();
-        this.onCellClick(pos.r, pos.c);
+        this.handleTap(pos);
       }
     });
 
@@ -138,22 +141,58 @@ export class Goban {
       if (Date.now() - lastTouchTime < 450) {
         return; // 刚处理过 touch，忽略生成的模拟 click
       }
-      if (this.isLocked) return;
-      const pos = getPosFromEvent(e);
-      if (pos && this.onCellClick) {
-        this.onCellClick(pos.r, pos.c);
-      }
+      this.handleTap(getPosFromEvent(e));
     });
   }
 
   /**
-   * 更新棋盘状态并重绘
+   * 统一处理一次点击/触摸
+   * 回放只读模式下不落子，而是把该交叉点交给检视回调（跳转到那一手）
    */
-  setBoardState(board, lastMove = null, winningLine = null, forbiddenPoints = []) {
+  handleTap(pos) {
+    if (!pos) return;
+
+    if (this.reviewOnly) {
+      if (this.onCellInspect) this.onCellInspect(pos.r, pos.c);
+      return;
+    }
+
+    if (this.isLocked) return;
+    if (this.onCellClick) this.onCellClick(pos.r, pos.c);
+  }
+
+  /**
+   * 更新棋盘状态并重绘
+   * @param {number[][]} board 局面
+   * @param {{r:number,c:number,color:number}|null} lastMove 当前焦点手（红点标记）
+   * @param {Array<[number,number]>|null} winningLine 五连高亮
+   * @param {Array<{r:number,c:number}>} forbiddenPoints 禁手标记
+   * @param {Array<{r:number,c:number,color:number}>} trail 回放落子轨迹（由早到晚）
+   */
+  setBoardState(board, lastMove = null, winningLine = null, forbiddenPoints = [], trail = []) {
     this.board = board;
     this.lastMove = lastMove;
     this.winningLine = winningLine;
     this.forbiddenPoints = forbiddenPoints;
+    this.trail = trail || [];
+    this.render();
+  }
+
+  /**
+   * 进入/退出回放只读模式
+   */
+  setReviewMode(on) {
+    this.reviewOnly = !!on;
+    this.hoverPos = null;
+    this.render();
+  }
+
+  /**
+   * 标记/清除分析推荐点（金色光环）
+   * @param {{r:number,c:number}|null} point
+   */
+  setHighlight(point) {
+    this.highlight = point && inBoard(point.r, point.c) ? { r: point.r, c: point.c } : null;
     this.render();
   }
 
@@ -191,22 +230,32 @@ export class Goban {
     // 4. 绘制所有已下棋子
     this.drawStones(ctx);
 
+    // 4.1 绘制回放落子轨迹（金色渐进折线 + 节点）
+    if (this.trail && this.trail.length > 1) {
+      this.drawTrail(ctx);
+    }
+
     // 5. 绘制禁手标记 (若开启)
     if (this.options.showForbiddenMarks && this.forbiddenPoints.length > 0 && this.turnColor === BLACK) {
       this.drawForbiddenMarks(ctx);
     }
 
-    // 6. 绘制最新一步的标记
+    // 6. 绘制分析推荐点光环
+    if (this.highlight) {
+      this.drawHighlightRing(ctx, this.highlight.r, this.highlight.c);
+    }
+
+    // 7. 绘制最新一步的标记
     if (this.lastMove) {
       this.drawLastMoveMarker(ctx, this.lastMove.r, this.lastMove.c, this.lastMove.color);
     }
 
-    // 7. 绘制获胜连线发光效果
+    // 8. 绘制获胜连线发光效果
     if (this.winningLine && this.winningLine.length >= 5) {
       this.drawWinningLine(ctx, this.winningLine);
     }
 
-    // 8. 绘制鼠标/触摸虚影
+    // 9. 绘制鼠标/触摸虚影
     if (!this.isLocked && this.hoverPos && this.board[this.hoverPos.r][this.hoverPos.c] === EMPTY) {
       this.drawGhostStone(ctx, this.hoverPos.r, this.hoverPos.c, this.turnColor);
     }
@@ -391,6 +440,60 @@ export class Goban {
     const x = this.margin + c * this.cellSize;
     const y = this.margin + r * this.cellSize;
     this.drawRealisticStone(ctx, x, y, color, 0.45);
+  }
+
+  /**
+   * 绘制回放落子轨迹：按落子顺序连成由淡到浓的金色折线 + 节点
+   */
+  drawTrail(ctx) {
+    const pts = this.trail.map(m => ({
+      x: this.margin + m.c * this.cellSize,
+      y: this.margin + m.r * this.cellSize
+    }));
+
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    // 轨迹线段：越靠近当前手越清晰
+    for (let i = 1; i < pts.length; i++) {
+      const t = i / (pts.length - 1);
+      ctx.strokeStyle = `rgba(255, 215, 0, ${0.10 + t * 0.40})`;
+      ctx.lineWidth = this.cellSize * (0.045 + t * 0.035);
+      ctx.beginPath();
+      ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+      ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+
+    // 轨迹节点
+    for (let i = 0; i < pts.length; i++) {
+      const t = i / (pts.length - 1);
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, this.cellSize * (0.05 + t * 0.035), 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 178, 0, ${0.22 + t * 0.55})`;
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * 分析推荐点：金色空心光环
+   */
+  drawHighlightRing(ctx, r, c) {
+    const x = this.margin + c * this.cellSize;
+    const y = this.margin + r * this.cellSize;
+
+    ctx.save();
+    ctx.strokeStyle = '#ffd54f';
+    ctx.lineWidth = Math.max(2, this.cellSize * 0.07);
+    ctx.shadowColor = 'rgba(255, 213, 79, 0.9)';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(x, y, this.stoneRadius * 1.18, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   drawLastMoveMarker(ctx, r, c, color) {
