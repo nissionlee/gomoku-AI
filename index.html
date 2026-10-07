@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
   <title>弈境五子棋 · AI 对弈平台 (Gomoku AI)</title>
-  <meta name="description" content="在线五子棋对弈网页版，支持本地高难度算法与大模型(DeepSeek/Gemini/OpenAI)接入，先手三三禁手规则，悔棋与战绩保存。">
+  <meta name="description" content="在线五子棋对弈网页版，支持本地高难度算法与大模型(DeepSeek/Gemini/OpenAI)接入，先手三三四四禁手规则，悔棋与战绩保存。">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23222'/><circle cx='40' cy='38' r='10' fill='%23666'/></svg>">
   <script>
@@ -80,8 +80,8 @@
       <div id="statsBarText" class="stats-summary">
         战绩加载中...
       </div>
-      <div class="rules-pill" title="标准五子棋规则：先手黑棋不可下三三禁手">
-        ⚠️ 先手三三禁手限制已生效
+      <div class="rules-pill" title="标准五子棋规则：先手黑棋不可下三三、四四禁手">
+        ⚠️ 先手禁手限制已生效
       </div>
     </section>
 
@@ -210,7 +210,7 @@
         <div class="panel-card tips-card">
           <h4>💡 下棋小贴士</h4>
           <ul class="tips-list">
-            <li><strong>先手禁手：</strong>执黑先行存在三三禁手规则，形成两个活三将被判定违规。</li>
+            <li><strong>先手禁手：</strong>执黑先行存在三三、四四禁手规则，同时形成两个活三或两个四将被判定违规。</li>
             <li><strong>悔棋功能：</strong>点击“悔棋”即可退回上一步，方便深思复盘。</li>
             <li><strong>逐手复盘：</strong>“落子轨迹”可回放任意一手并自动连线显示落子顺序，“棋局分析”则给出该手评分、是否最优与更推荐下法；旧对局在“战绩记录”里点“复盘”同样可查。</li>
             <li><strong>大模型对战：</strong>可在“设置”中填入 DeepSeek、Gemini、通义千问等 API Key，开启智能人设立体对弈！</li>
@@ -291,7 +291,10 @@
               <input type="checkbox" id="cfgCheckDoubleThree" checked> 开启先手三三禁手规则 (严格限制先手黑棋不可下双活三)
             </label>
             <label class="checkbox-label">
-              <input type="checkbox" id="cfgShowForbiddenMarks" checked> 在棋盘上以红色微标记提示当前三三禁手点
+              <input type="checkbox" id="cfgCheckDoubleFour" checked> 开启先手四四禁手规则 (严格限制先手黑棋不可下双四)
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgShowForbiddenMarks" checked> 在棋盘上以红色微标记提示当前禁手点
             </label>
           </div>
         </div>
@@ -442,13 +445,16 @@
         <h3>1. 基本规则</h3>
         <p>五子棋在 15×15 的棋盘上进行，黑先白后，双方轮流落子。任何一方率先在横向、纵向或对角线方向连成五颗同色棋子，即获得胜利。</p>
 
-        <h3>2. 先手优势与【三三禁手】</h3>
+        <h3>2. 先手优势与【禁手规则】</h3>
         <p>现代竞技五子棋（连珠规则）中，先手黑棋拥有极大的先行进攻优势。如果不加限制，黑棋必胜。因此国际比赛对先手黑棋施加了禁手规则：</p>
         <ul>
-          <li><strong>三三禁手（核心规则）：</strong>黑棋一子落下，若同时形成两个或两个以上的“活三”，则判定为违规禁手，黑棋不可在此落子。</li>
+          <li><strong>三三禁手：</strong>黑棋一子落下，若同时形成两个或两个以上的“活三”，则判定为违规禁手，黑棋不可在此落子。</li>
+          <li><strong>四四禁手：</strong>黑棋一子落下，若同时形成两个或两个以上的“四”（活四与冲四都计入），同样判定为违规禁手。</li>
+          <li><strong>长连禁手：</strong>黑棋一子落下形成 6 颗及以上连子，判定为违规禁手（白棋连成 6 颗或以上则算获胜）。</li>
           <li><strong>什么是活三？</strong>两端均未被白棋封堵、下一步即可成“活四”的三颗黑子（如 <code>_XXX_</code> 或跳三 <code>_X_XX_</code>）。</li>
+          <li><strong>四三不算禁手：</strong>一子同时形成一个“四”和一个“活三”（四三杀），是黑棋唯一合法的取胜手段。判定时某方向已成“四”就不再重复计入活三，否则四三杀会被误判成三三禁手。</li>
           <li><strong>白棋无禁手：</strong>后手白棋没有任何禁手限制，可以下三三、四四，白棋连成6颗或以上也算获胜。</li>
-          <li><strong>五连优先：</strong>若黑棋落子形成五连的同时也构成了三三，以五连获胜优先，不算禁手。</li>
+          <li><strong>五连优先：</strong>若黑棋落子形成五连的同时也构成了禁手，以五连获胜优先，不算禁手。</li>
         </ul>
 
         <h3>3. 游戏功能特性</h3>

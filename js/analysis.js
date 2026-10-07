@@ -121,9 +121,9 @@ export function analyzeMove(moves, index, opts = {}) {
   const myShapes = shapesIfPlaced(board, mv.r, mv.c, color);
   const bestShapes = best ? shapesIfPlaced(board, best.r, best.c, color) : [];
 
-  // 2. 禁手判定（仅黑棋且开启规则时）
+  // 2. 禁手判定（仅黑棋且开启规则时，按完整标准连珠：三三 + 四四 + 长连）
   const forbidden = (color === BLACK && forbidOn)
-    ? checkForbidden(board, mv.r, mv.c, { checkDoubleThree: true, checkDoubleFour: false, checkOverline: true })
+    ? checkForbidden(board, mv.r, mv.c)
     : { isForbidden: false };
 
   // 3. 本手的防守分量：若让对方抢到此点，对方能成什么

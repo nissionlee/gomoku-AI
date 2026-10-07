@@ -209,6 +209,15 @@ export function isOverline(board, r, c) {
 }
 
 /**
+ * 禁手判定的默认配置：完整标准连珠（三三 + 四四 + 长连全部启用）
+ */
+export const DEFAULT_FORBIDDEN_OPTIONS = {
+  checkDoubleThree: true,
+  checkDoubleFour: true,
+  checkOverline: true
+};
+
+/**
  * 全面判定黑棋落子在 (r, c) 是否触犯禁手规则
  * @param {number[][]} board 棋盘状态 (此时 (r, c) 尚为空)
  * @param {number} r 行
@@ -216,7 +225,9 @@ export function isOverline(board, r, c) {
  * @param {Object} options 禁手配置项 { checkDoubleThree: true, checkDoubleFour: true, checkOverline: true }
  * @returns {{ isForbidden: boolean, reason?: string, type?: 'double_three' | 'double_four' | 'overline' }}
  */
-export function checkForbidden(board, r, c, options = { checkDoubleThree: true, checkDoubleFour: false, checkOverline: true }) {
+export function checkForbidden(board, r, c, options = {}) {
+  const opts = { ...DEFAULT_FORBIDDEN_OPTIONS, ...options };
+
   if (board[r][c] !== EMPTY) {
     return { isForbidden: false };
   }
@@ -232,7 +243,7 @@ export function checkForbidden(board, r, c, options = { checkDoubleThree: true, 
   }
 
   // 2. 长连禁手检测 (超过5连)
-  if (options.checkOverline && isOverline(board, r, c)) {
+  if (opts.checkOverline && isOverline(board, r, c)) {
     board[r][c] = EMPTY;
     return {
       isForbidden: true,
@@ -241,15 +252,28 @@ export function checkForbidden(board, r, c, options = { checkDoubleThree: true, 
     };
   }
 
-  // 3. 三三禁手检测 (同时形成两个及以上活三)
-  if (options.checkDoubleThree) {
+  // 3. 三三 / 四四禁手检测
+  //
+  // 【关键】方向分类必须遵循优先级：五 > 四 > 三。
+  // 一个方向一旦构成「四」（活四或冲四），就不能再把它计入活三，
+  // 否则经典的四三取胜棋形会被误判成三三禁手。
+  // 反例：水平形成 ●●●·●（跳四，补空档即五连）+ 垂直形成跳活三 ——
+  //       这是「四三」杀，黑棋合法取胜手段，绝不能判三三禁手。
+  if (opts.checkDoubleThree || opts.checkDoubleFour) {
     let openThreeCount = 0;
+    let fourCount = 0;
+
     for (const [dr, dc] of DIRECTIONS) {
-      if (isOpenThree(board, r, c, dr, dc)) {
+      if (isFour(board, r, c, dr, dc)) {
+        fourCount++;
+        continue; // 该方向按「四」计，不再计入活三
+      }
+      if (opts.checkDoubleThree && isOpenThree(board, r, c, dr, dc)) {
         openThreeCount++;
       }
     }
-    if (openThreeCount >= 2) {
+
+    if (opts.checkDoubleThree && openThreeCount >= 2) {
       board[r][c] = EMPTY;
       return {
         isForbidden: true,
@@ -257,17 +281,8 @@ export function checkForbidden(board, r, c, options = { checkDoubleThree: true, 
         reason: '先手三三禁手：黑棋不可同时形成两个及以上活三'
       };
     }
-  }
 
-  // 4. 四四禁手检测 (同时形成两个及以上四)
-  if (options.checkDoubleFour) {
-    let fourCount = 0;
-    for (const [dr, dc] of DIRECTIONS) {
-      if (isFour(board, r, c, dr, dc)) {
-        fourCount++;
-      }
-    }
-    if (fourCount >= 2) {
+    if (opts.checkDoubleFour && fourCount >= 2) {
       board[r][c] = EMPTY;
       return {
         isForbidden: true,

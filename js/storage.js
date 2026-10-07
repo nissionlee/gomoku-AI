@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   difficulty: 'medium',        // 'low' | 'medium' | 'high'
   playerColor: 1,              // 1: 黑棋(先手), 2: 白棋(后手)
   checkDoubleThree: true,      // 开启先手三三禁手
+  checkDoubleFour: true,       // 开启先手四四禁手
   showForbiddenMarks: true,    // 棋盘上提示禁手点
   soundEnabled: true,          // 音效
   llmConfig: {

@@ -125,7 +125,8 @@ export function evaluatePoint(board, r, c, myColor, checkBlackForbidden = true) 
 
   // 如果我方执黑且开启了禁手，违规点直接摒弃
   if (myColor === BLACK && checkBlackForbidden) {
-    const forbidden = checkForbidden(board, r, c, { checkDoubleThree: true, checkDoubleFour: false, checkOverline: true });
+    // 规避禁手时按完整标准连珠判定（三三 + 四四 + 长连）
+    const forbidden = checkForbidden(board, r, c);
     if (forbidden.isForbidden) {
       return -Infinity;
     }
@@ -285,11 +286,12 @@ function alphaBeta(board, depth, alpha, beta, isMaximizing, myColor, checkForbid
  * @param {number[][]} board 棋盘状态
  * @param {number} myColor AI 棋子颜色 (1:黑, 2:白)
  * @param {'low'|'medium'|'high'} difficulty 难度等级
- * @param {Object} options 配置项 (是否开启三三禁手等)
+ * @param {Object} options 配置项 { checkBlackForbidden?: boolean, checkDoubleThree?: boolean(兼容旧写法) }
  * @returns {{ r: number, c: number, score: number, notation: string, candidates: Array<any> }}
  */
-export function getBestMove(board, myColor, difficulty = 'medium', options = { checkDoubleThree: true }) {
-  const checkBlackForbidden = options.checkDoubleThree;
+export function getBestMove(board, myColor, difficulty = 'medium', options = {}) {
+  // checkBlackForbidden 为准；兼容旧调用方传入的 checkDoubleThree 布尔值
+  const checkBlackForbidden = options.checkBlackForbidden ?? options.checkDoubleThree ?? true;
   const candidates = getCandidateMoves(board, myColor, 12, checkBlackForbidden);
 
   if (candidates.length === 0) {

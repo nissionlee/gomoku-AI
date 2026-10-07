@@ -376,17 +376,13 @@ class GomokuApp {
       // ===== 双人同屏 (人人对弈) =====
       const currentColor = this.turn;
 
-      // 检查先手黑棋三三禁手
-      if (currentColor === BLACK && this.settings.checkDoubleThree) {
-        const forbidden = checkForbidden(this.board, r, c, {
-          checkDoubleThree: true,
-          checkDoubleFour: false,
-          checkOverline: true
-        });
+      // 检查先手黑棋禁手（三三 / 四四 / 长连）
+      if (currentColor === BLACK && this.isForbiddenRuleOn()) {
+        const forbidden = checkForbidden(this.board, r, c, this.forbiddenOptions());
 
         if (forbidden.isForbidden) {
           sound.playWarning();
-          this.showToast(`⚠️ ${forbidden.reason || '先手三三禁手，此步违规不可落子！'}`);
+          this.showToast(`⚠️ ${forbidden.reason || '先手禁手，此步违规不可落子！'}`);
           return;
         }
       }
@@ -407,17 +403,13 @@ class GomokuApp {
       // ===== 人机对弈模式 =====
       if (this.turn !== this.playerColor) return;
 
-      // 检查先手三三禁手限制
-      if (this.playerColor === BLACK && this.settings.checkDoubleThree) {
-        const forbidden = checkForbidden(this.board, r, c, {
-          checkDoubleThree: true,
-          checkDoubleFour: false,
-          checkOverline: true
-        });
+      // 检查先手禁手限制（三三 / 四四 / 长连）
+      if (this.playerColor === BLACK && this.isForbiddenRuleOn()) {
+        const forbidden = checkForbidden(this.board, r, c, this.forbiddenOptions());
 
         if (forbidden.isForbidden) {
           sound.playWarning();
-          this.showToast(`⚠️ ${forbidden.reason || '先手三三禁手，此步违规不可落子！'}`);
+          this.showToast(`⚠️ ${forbidden.reason || '先手禁手，此步违规不可落子！'}`);
           return;
         }
       }
@@ -457,7 +449,7 @@ class GomokuApp {
     if (this.replay.active) return;
 
     // 计算禁手标记
-    const forbidden = this.turn === WHITE && this.settings.checkDoubleThree
+    const forbidden = this.turn === WHITE && this.isForbiddenRuleOn()
       ? this.calculateForbiddenPoints()
       : [];
 
@@ -483,7 +475,7 @@ class GomokuApp {
         aiComment = '天元启手，先占中宫！';
       } else if (this.settings.aiEngine === 'llm') {
         // 大模型对弈
-        const candidates = getCandidateMoves(this.board, this.aiColor, 5, this.aiColor === BLACK && this.settings.checkDoubleThree);
+        const candidates = getCandidateMoves(this.board, this.aiColor, 5, this.aiColor === BLACK && this.isForbiddenRuleOn());
         const llmResult = await getLLMMove(
           this.settings.llmConfig,
           this.board,
@@ -497,7 +489,7 @@ class GomokuApp {
         // 本地算法引擎
         await new Promise(res => setTimeout(res, 350 + Math.random() * 250)); // 自然拟人停顿
         chosenMove = getBestMove(this.board, this.aiColor, this.settings.difficulty, {
-          checkDoubleThree: this.settings.checkDoubleThree
+          checkBlackForbidden: this.aiColor === BLACK && this.isForbiddenRuleOn()
         });
         aiComment = this.generateAlgorithmComment(chosenMove.score);
       }
@@ -672,7 +664,7 @@ class GomokuApp {
 
     const previousMove = this.moveHistory[this.moveHistory.length - 1] || null;
 
-    const forbidden = this.turn === BLACK && this.settings.checkDoubleThree
+    const forbidden = this.turn === BLACK && this.isForbiddenRuleOn()
       ? this.calculateForbiddenPoints()
       : [];
 
@@ -766,7 +758,7 @@ class GomokuApp {
     const currentHintColor = this.isPvP() ? this.turn : this.playerColor;
 
     const best = getBestMove(this.board, currentHintColor, 'high', {
-      checkDoubleThree: currentHintColor === BLACK && this.settings.checkDoubleThree
+      checkBlackForbidden: currentHintColor === BLACK && this.isForbiddenRuleOn()
     });
 
     if (best) {
@@ -1036,7 +1028,7 @@ class GomokuApp {
    */
   restoreLiveView() {
     const last = this.moveHistory[this.moveHistory.length - 1] || null;
-    const showForbidden = this.gameStatus === 'playing' && this.turn === BLACK && this.settings.checkDoubleThree;
+    const showForbidden = this.gameStatus === 'playing' && this.turn === BLACK && this.isForbiddenRuleOn();
     const forbidden = showForbidden ? this.calculateForbiddenPoints() : [];
 
     this.goban.setBoardState(
@@ -1352,7 +1344,7 @@ class GomokuApp {
 
     try {
       const res = analyzeMove(moves, no - 1, {
-        checkBlackForbidden: this.settings.checkDoubleThree
+        checkBlackForbidden: this.isForbiddenRuleOn()
       });
       if (!res) {
         this.renderAnalysisError('这一手记录不完整，无法分析');
@@ -1399,7 +1391,7 @@ class GomokuApp {
 
     try {
       const res = analyzePosition(moves, no, {
-        checkBlackForbidden: this.settings.checkDoubleThree
+        checkBlackForbidden: this.isForbiddenRuleOn()
       });
       this.analysisCache.set(key, res);
       this.lastAnalysis = { kind: 'position', scopeKey: key, moveNo: no, data: res, deep: this.deepCache.get(key) || null };
@@ -1437,7 +1429,7 @@ class GomokuApp {
       const key = this.scopeKey('m', no);
       let data = this.analysisCache.get(key);
       if (!data) {
-        data = analyzeMove(moves, no - 1, { checkBlackForbidden: this.settings.checkDoubleThree });
+        data = analyzeMove(moves, no - 1, { checkBlackForbidden: this.isForbiddenRuleOn() });
         if (data) this.analysisCache.set(key, data);
       }
       if (!data) {
@@ -1468,8 +1460,12 @@ class GomokuApp {
       historyText: this.historyTextForLLM(moves, no),
       focusText,
       localReport: formatAnalysisForLLM(base.data),
-      ruleText: this.settings.checkDoubleThree
-        ? '规则：15×15 棋盘，黑棋先行；黑棋受三三禁手限制（不可同时形成两个及以上活三），白棋无禁手。'
+      ruleText: this.isForbiddenRuleOn()
+        ? `规则：15×15 棋盘，黑棋先行；黑棋受${[
+            this.settings.checkDoubleThree !== false ? '三三禁手' : null,
+            this.settings.checkDoubleFour !== false ? '四四禁手' : null,
+            '长连禁手'
+          ].filter(Boolean).join('、')}限制，白棋无禁手。`
         : '规则：15×15 棋盘，黑棋先行，无禁手限制。'
     });
 
@@ -1685,19 +1681,34 @@ class GomokuApp {
   }
 
   /**
-   * 计算黑棋当前所有三三禁手点
+   * 当前生效的禁手判定配置（白棋永远无禁手，只在黑棋回合使用）
+   */
+  forbiddenOptions() {
+    return {
+      checkDoubleThree: this.settings.checkDoubleThree !== false,
+      checkDoubleFour: this.settings.checkDoubleFour !== false,
+      checkOverline: true
+    };
+  }
+
+  /**
+   * 是否至少开启了一项禁手规则
+   */
+  isForbiddenRuleOn() {
+    return this.settings.checkDoubleThree !== false || this.settings.checkDoubleFour !== false;
+  }
+
+  /**
+   * 计算黑棋当前所有禁手点（三三 / 四四 / 长连）
    */
   calculateForbiddenPoints() {
-    if (!this.settings.checkDoubleThree) return [];
+    if (!this.isForbiddenRuleOn()) return [];
+    const options = this.forbiddenOptions();
     const forbiddenList = [];
     for (let r = 0; r < BOARD_SIZE; r++) {
       for (let c = 0; c < BOARD_SIZE; c++) {
         if (this.board[r][c] === EMPTY) {
-          const res = checkForbidden(this.board, r, c, {
-            checkDoubleThree: true,
-            checkDoubleFour: false,
-            checkOverline: true
-          });
+          const res = checkForbidden(this.board, r, c, options);
           if (res.isForbidden) {
             forbiddenList.push({ r, c, reason: res.reason });
           }
@@ -1898,6 +1909,9 @@ class GomokuApp {
     const checkDoubleThree = document.getElementById('cfgCheckDoubleThree');
     if (checkDoubleThree) checkDoubleThree.checked = this.settings.checkDoubleThree;
 
+    const checkDoubleFour = document.getElementById('cfgCheckDoubleFour');
+    if (checkDoubleFour) checkDoubleFour.checked = this.settings.checkDoubleFour !== false;
+
     const showForbiddenMarks = document.getElementById('cfgShowForbiddenMarks');
     if (showForbiddenMarks) showForbiddenMarks.checked = this.settings.showForbiddenMarks;
 
@@ -1973,6 +1987,7 @@ class GomokuApp {
       const playerColor = Number(document.querySelector('input[name="cfgPlayerColor"]:checked')?.value || 1);
       const difficulty = document.querySelector('input[name="cfgDifficulty"]:checked')?.value || 'medium';
       const checkDoubleThree = document.getElementById('cfgCheckDoubleThree')?.checked ?? true;
+      const checkDoubleFour = document.getElementById('cfgCheckDoubleFour')?.checked ?? true;
       const showForbiddenMarks = document.getElementById('cfgShowForbiddenMarks')?.checked ?? true;
 
       const llmConfig = {
@@ -1992,6 +2007,7 @@ class GomokuApp {
         playerColor,
         difficulty,
         checkDoubleThree,
+        checkDoubleFour,
         showForbiddenMarks,
         llmConfig
       };
