@@ -13,6 +13,21 @@ import {
   formatAnalysisForLLM
 } from './analysis.js';
 import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS } from './llm.js';
+import { searchPro, boardToFlat } from './engine-pro.js';
+import {
+  generateSyncCode,
+  normalizeSyncCode,
+  isValidSyncCode,
+  getSavedSyncCode,
+  saveSyncCode,
+  forgetSyncCode,
+  isAutoSyncEnabled,
+  setAutoSyncEnabled,
+  pushSettings,
+  pullSettings,
+  deleteSettings,
+  mergeSettings
+} from './sync.js';
 import { sound } from './audio.js';
 import { StorageManager } from './storage.js';
 import { Goban } from './board.js';
@@ -45,12 +60,16 @@ class GomokuApp {
     };
 
     // 逐手分析缓存（仅内存态，避免污染 localStorage）
-    this.analysisCache = new Map(); // key: 'm#手数' | 'p#手数'
+    this.analysisCache = new Map(); // key: `${来源}-${m|p}${手数}`，如 live-m5 / g1727-m9
     this.deepCache = new Map();     // key: 同上 → { text, model }
     this.lastAnalysis = null;       // 当前展示的分析 { kind, scopeKey, moveNo, data, deep, deepError, deepLoading }
     this.analyzing = false;
     this.deepAnalyzing = false;
     this.statusShowsReplay = false;
+
+    // 跨设备配置同步
+    this.syncBusy = false;
+    this.pendingSyncToast = '';
 
     // DOM 元素
     this.cacheElements();
@@ -70,8 +89,24 @@ class GomokuApp {
     this.syncSettingsToUI();
     this.updateStatsBar();
 
-    // 自动开启第一局
+    // 先尝试套用云端较新的配置，再自动开启第一局
+    this.bootApp();
+  }
+
+  /**
+   * 异步启动：自动同步（若已绑定同步码）→ 开第一局
+   */
+  async bootApp() {
+    try {
+      await this.autoPullSettings();
+    } catch (err) {
+      console.warn('自动同步设置失败：', err);
+    }
     this.startNewGame();
+    if (this.pendingSyncToast) {
+      this.showToast(this.pendingSyncToast);
+      this.pendingSyncToast = '';
+    }
   }
 
   cacheElements() {
@@ -120,6 +155,17 @@ class GomokuApp {
     this.btnAnalyzeDeep = document.getElementById('btnAnalyzeDeep');
     this.analysisResult = document.getElementById('analysisResult');
 
+    // 跨设备配置同步（设置弹窗内）
+    this.syncSection = document.getElementById('syncSection');
+    this.syncCodeInput = document.getElementById('syncCodeInput');
+    this.btnSyncNewCode = document.getElementById('btnSyncNewCode');
+    this.btnSyncUpload = document.getElementById('btnSyncUpload');
+    this.btnSyncDownload = document.getElementById('btnSyncDownload');
+    this.btnSyncCopy = document.getElementById('btnSyncCopy');
+    this.btnSyncDelete = document.getElementById('btnSyncDelete');
+    this.syncStatusEl = document.getElementById('syncStatus');
+    this.cfgSyncAuto = document.getElementById('cfgSyncAuto');
+
     // 难度与引擎快捷选择
     this.difficultySelect = document.getElementById('difficultySelect');
     this.engineSelect = document.getElementById('engineSelect');
@@ -154,13 +200,13 @@ class GomokuApp {
     // 快捷切换
     this.difficultySelect.addEventListener('change', (e) => {
       this.settings.difficulty = e.target.value;
-      StorageManager.saveSettings(this.settings);
+      this.persistSettings();
       this.showToast(`已切换为：${this.getDifficultyLabel(e.target.value)}`);
     });
 
     this.engineSelect.addEventListener('change', (e) => {
       this.settings.aiEngine = e.target.value;
-      StorageManager.saveSettings(this.settings);
+      this.persistSettings();
       this.updateEngineBadge();
       const label = e.target.value === 'pvp'
         ? '双人同屏对弈 (人人模式)'
@@ -174,7 +220,7 @@ class GomokuApp {
       const current = sound.isMuted();
       sound.setMuted(!current);
       this.settings.soundEnabled = current;
-      StorageManager.saveSettings(this.settings);
+      this.persistSettings();
       this.updateSoundButton();
     });
 
@@ -196,6 +242,9 @@ class GomokuApp {
     // 落子轨迹回放 + 逐手分析
     this.bindReplayEvents();
     this.bindAnalysisEvents();
+
+    // 跨设备配置同步
+    this.bindSettingsSyncEvents();
 
     // 战绩清空
     document.getElementById('btnClearHistory')?.addEventListener('click', () => {
@@ -485,6 +534,27 @@ class GomokuApp {
         );
         chosenMove = { r: llmResult.r, c: llmResult.c, notation: llmResult.notation };
         aiComment = llmResult.comment;
+      } else if (this.settings.difficulty === 'pro') {
+        // 职业级：Web Worker 后台深度搜索（VCF 杀棋 + 迭代加深），主线程不卡
+        this.statusTextEl.textContent = 'AI 职业级深度思考中…';
+        const proMove = await this.requestProMove(this.board, this.aiColor, {
+          timeLimit: 1400,
+          maxDepth: 8,
+          forbidOptions: this.forbiddenOptions()
+        });
+        if (proMove) {
+          chosenMove = proMove;
+          aiComment = this.generateAlgorithmComment(proMove.score);
+          if (proMove.reason && String(proMove.reason).indexOf('vcf') === 0) {
+            aiComment = '已算到连续冲四的必胜路线，请小心！';
+          }
+        } else {
+          // Worker 不可用或超时 → 回退到大师级，保证仍能落子
+          chosenMove = getBestMove(this.board, this.aiColor, 'high', {
+            checkBlackForbidden: this.aiColor === BLACK && this.isForbiddenRuleOn()
+          });
+          aiComment = this.generateAlgorithmComment(chosenMove.score);
+        }
       } else {
         // 本地算法引擎
         await new Promise(res => setTimeout(res, 350 + Math.random() * 250)); // 自然拟人停顿
@@ -521,6 +591,84 @@ class GomokuApp {
     } finally {
       this.statusTextEl.classList.remove('ai-thinking');
     }
+  }
+
+  /**
+   * 惰性创建职业级搜索 Worker；不支持模块 Worker 的浏览器（部分电子书/旧内核）返回 null
+   */
+  ensureProWorker() {
+    if (this.proWorker !== undefined) return this.proWorker;
+    this.proWorker = null;
+    try {
+      const url = new URL('js/engine-worker.js', document.baseURI).href;
+      const worker = new Worker(url, { type: 'module' });
+      worker.onerror = () => {
+        console.warn('职业级 Worker 出错，回退到主线程搜索');
+        try { worker.terminate(); } catch (e) { /* ignore */ }
+        if (this.proWorker === worker) this.proWorker = null;
+      };
+      this.proWorker = worker;
+    } catch (e) {
+      console.warn('Web Worker 不可用，职业级改用主线程同步搜索', e);
+      this.proWorker = null;
+    }
+    return this.proWorker;
+  }
+
+  /**
+   * 请求职业级着法：优先 Worker，失败/超时回退主线程，再不行返回 null 由调用方兜底
+   */
+  requestProMove(board, color, options = {}) {
+    const timeLimit = options.timeLimit || 1400;
+    return new Promise((resolve) => {
+      const worker = this.ensureProWorker();
+
+      if (!worker) {
+        try {
+          const mv = searchPro(board, color, { ...options, timeLimit: Math.min(900, timeLimit) });
+          resolve(mv ? { r: mv.r, c: mv.c, notation: mv.notation, score: mv.score, depth: mv.depth, reason: mv.reason } : null);
+        } catch (e) {
+          console.error('职业级同步搜索失败:', e);
+          resolve(null);
+        }
+        return;
+      }
+
+      const id = (this.proReqId = (this.proReqId || 0) + 1);
+      let settled = false;
+
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.removeEventListener('message', onMessage);
+        resolve(value);
+      };
+
+      const onMessage = (event) => {
+        const data = event.data;
+        if (!data || data.id !== id) return;
+        if (!data.ok || !data.move) return finish(null);
+        finish({
+          r: data.move.r,
+          c: data.move.c,
+          notation: data.move.notation,
+          score: data.move.score,
+          depth: data.move.depth,
+          reason: data.move.reason
+        });
+      };
+
+      // 兜底超时：Worker 卡死也不能让对局停摆
+      const timer = setTimeout(() => finish(null), timeLimit + 3000);
+
+      worker.addEventListener('message', onMessage);
+      try {
+        worker.postMessage({ id, flat: boardToFlat(board), color, options });
+      } catch (e) {
+        finish(null);
+      }
+    });
   }
 
   /**
@@ -1790,6 +1938,7 @@ class GomokuApp {
       case 'low': return '入门低难度';
       case 'medium': return '业余中难度';
       case 'high': return '大师高难度';
+      case 'pro': return '职业级';
       default: return '中难度';
     }
   }
@@ -1983,39 +2132,16 @@ class GomokuApp {
 
     // 保存设置按钮
     document.getElementById('btnSaveSettings')?.addEventListener('click', () => {
-      const engine = document.querySelector('input[name="cfgAiEngine"]:checked')?.value || 'local';
-      const playerColor = Number(document.querySelector('input[name="cfgPlayerColor"]:checked')?.value || 1);
-      const difficulty = document.querySelector('input[name="cfgDifficulty"]:checked')?.value || 'medium';
-      const checkDoubleThree = document.getElementById('cfgCheckDoubleThree')?.checked ?? true;
-      const checkDoubleFour = document.getElementById('cfgCheckDoubleFour')?.checked ?? true;
-      const showForbiddenMarks = document.getElementById('cfgShowForbiddenMarks')?.checked ?? true;
+      const next = this.readSettingsForm();
+      const colorChanged = this.settings.playerColor !== next.playerColor;
+      const modeChanged = this.settings.aiEngine !== next.aiEngine;
 
-      const llmConfig = {
-        provider: document.getElementById('cfgLlmProvider')?.value || 'deepseek',
-        baseUrl: document.getElementById('cfgLlmBaseUrl')?.value || '',
-        apiKey: document.getElementById('cfgLlmApiKey')?.value || '',
-        model: document.getElementById('cfgLlmModel')?.value || '',
-        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous'
-      };
+      this.settings = { ...this.settings, ...next };
 
-      const colorChanged = this.settings.playerColor !== playerColor;
-      const modeChanged = this.settings.aiEngine !== engine;
-
-      this.settings = {
-        ...this.settings,
-        aiEngine: engine,
-        playerColor,
-        difficulty,
-        checkDoubleThree,
-        checkDoubleFour,
-        showForbiddenMarks,
-        llmConfig
-      };
-
-      StorageManager.saveSettings(this.settings);
-      this.goban.options.showForbiddenMarks = showForbiddenMarks;
-      this.difficultySelect.value = difficulty;
-      this.engineSelect.value = engine;
+      this.persistSettings();
+      this.goban.options.showForbiddenMarks = next.showForbiddenMarks;
+      this.difficultySelect.value = next.difficulty;
+      this.engineSelect.value = next.aiEngine;
       this.updateEngineBadge();
 
       this.settingsModal.classList.remove('active');
@@ -2027,8 +2153,289 @@ class GomokuApp {
     });
   }
 
+  /**
+   * 读取设置弹窗当前表单值（不写盘，供保存与云端上传共用）
+   */
+  readSettingsForm() {
+    return {
+      aiEngine: document.querySelector('input[name="cfgAiEngine"]:checked')?.value || 'local',
+      playerColor: Number(document.querySelector('input[name="cfgPlayerColor"]:checked')?.value || 1),
+      difficulty: document.querySelector('input[name="cfgDifficulty"]:checked')?.value || 'medium',
+      checkDoubleThree: document.getElementById('cfgCheckDoubleThree')?.checked ?? true,
+      checkDoubleFour: document.getElementById('cfgCheckDoubleFour')?.checked ?? true,
+      showForbiddenMarks: document.getElementById('cfgShowForbiddenMarks')?.checked ?? true,
+      llmConfig: {
+        provider: document.getElementById('cfgLlmProvider')?.value || 'deepseek',
+        baseUrl: document.getElementById('cfgLlmBaseUrl')?.value || '',
+        apiKey: document.getElementById('cfgLlmApiKey')?.value || '',
+        model: document.getElementById('cfgLlmModel')?.value || '',
+        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous'
+      }
+    };
+  }
+
+  /**
+   * 写盘并刷新更新时间戳（跨设备同步靠它判断哪份配置更新）
+   */
+  persistSettings(updatedAt = Date.now()) {
+    this.settings = { ...this.settings, updatedAt };
+    StorageManager.saveSettings(this.settings);
+  }
+
+  /* ======================================================================
+     跨设备配置同步
+     ====================================================================== */
+
+  bindSettingsSyncEvents() {
+    this.btnSyncNewCode?.addEventListener('click', () => {
+      const code = generateSyncCode();
+      if (this.syncCodeInput) {
+        this.syncCodeInput.value = code;
+        this.syncCodeInput.focus();
+        this.syncCodeInput.select();
+      }
+      this.setSyncStatus(`已生成同步码 ${code}。点「⬆️ 上传本机设置」后，在手机浏览器输入这串码点「拉取并套用」。`, 'ok');
+    });
+
+    this.btnSyncUpload?.addEventListener('click', () => this.handleSyncUpload());
+    this.btnSyncDownload?.addEventListener('click', () => this.handleSyncDownload());
+    this.btnSyncDelete?.addEventListener('click', () => this.handleSyncDelete());
+    this.btnSyncCopy?.addEventListener('click', () => this.handleSyncCopy());
+
+    this.cfgSyncAuto?.addEventListener('change', (e) => {
+      setAutoSyncEnabled(e.target.checked);
+      this.setSyncStatus(e.target.checked
+        ? '已开启开机自动拉取：本机记住同步码后，打开页面会自动套用云端更新过的配置。'
+        : '已关闭开机自动拉取，仍可手动点「⬇️ 拉取并套用」。', 'ok');
+    });
+  }
+
+  setSyncStatus(msg, tone = '') {
+    if (!this.syncStatusEl) return;
+    this.syncStatusEl.textContent = msg;
+    this.syncStatusEl.className = `sync-status ${tone}`.trim();
+  }
+
+  /**
+   * 取输入框中合法的同步码，非法则回显提示并返回空串
+   */
+  currentSyncCode() {
+    const raw = this.syncCodeInput ? this.syncCodeInput.value : '';
+    const code = normalizeSyncCode(raw);
+    if (this.syncCodeInput && this.syncCodeInput.value !== code) this.syncCodeInput.value = code;
+
+    if (!isValidSyncCode(code)) {
+      this.setSyncStatus('同步码需为 8-16 位字母或数字（可点「🎲 新建」生成 10 位）。', 'err');
+      return '';
+    }
+    return code;
+  }
+
+  /**
+   * 打开设置弹窗时回填本机同步码与自动拉取勾选
+   */
+  syncSyncUi() {
+    const saved = getSavedSyncCode();
+    if (this.syncCodeInput && !this.syncCodeInput.value && saved) {
+      this.syncCodeInput.value = saved;
+    }
+    if (this.cfgSyncAuto) this.cfgSyncAuto.checked = isAutoSyncEnabled();
+
+    if (this.syncStatusEl && !this.syncStatusEl.textContent) {
+      this.setSyncStatus(saved
+        ? `本机已绑定同步码 ${saved}，改完设置点「⬆️ 上传本机设置」即可更新云端。`
+        : '首次使用：点「🎲 新建」生成同步码 → 「⬆️ 上传本机设置」→ 手机输入同一串码「⬇️ 拉取并套用」。', '');
+    }
+  }
+
+  async handleSyncUpload() {
+    if (this.syncBusy) return;
+    const code = this.currentSyncCode();
+    if (!code) return;
+
+    // 先把弹窗里尚未保存的表单值纳入，避免上传的是旧配置
+    this.settings = { ...this.settings, ...this.readSettingsForm() };
+
+    this.syncBusy = true;
+    this.setSyncStatus('正在上传本机设置到云端…', 'busy');
+    const res = await pushSettings(code, this.settings);
+    this.syncBusy = false;
+
+    if (!res.ok) {
+      this.setSyncStatus(`上传失败：${res.error}`, 'err');
+      return;
+    }
+
+    saveSyncCode(code);
+    const expire = res.expiresAt ? `，有效期至 ${this.formatStamp(res.expiresAt)}` : '';
+    this.setSyncStatus(`✅ 已上传（同步码 ${code}）${expire}。在手机浏览器「⚙️ 设置 → 跨设备同步」输入该码并拉取即可。`, 'ok');
+    this.showToast('☁️ 本机设置已上传云端');
+  }
+
+  async handleSyncDownload() {
+    if (this.syncBusy) return;
+    const code = this.currentSyncCode();
+    if (!code) return;
+
+    this.syncBusy = true;
+    this.setSyncStatus('正在拉取云端配置…', 'busy');
+    const res = await pullSettings(code);
+    this.syncBusy = false;
+
+    if (!res.ok) {
+      this.setSyncStatus(`拉取失败：${res.error}`, 'err');
+      return;
+    }
+
+    saveSyncCode(code);
+    this.applyRemoteSettings(res.settings, res.updatedAt);
+    this.setSyncStatus(
+      `✅ 已套用云端配置：${this.describeSettingsBrief(res.settings)}，更新于 ${this.formatStamp(res.updatedAt)}。`,
+      'ok'
+    );
+    this.showToast('☁️ 已套用云端配置');
+  }
+
+  async handleSyncDelete() {
+    if (this.syncBusy) return;
+    const code = this.currentSyncCode();
+    if (!code) return;
+    if (!confirm(`确定清除云端配置（同步码 ${code}）吗？清除后其他设备将无法再拉取该配置。`)) return;
+
+    this.syncBusy = true;
+    const res = await deleteSettings(code);
+    this.syncBusy = false;
+
+    if (!res.ok) {
+      this.setSyncStatus(`清除失败：${res.error}`, 'err');
+      return;
+    }
+    if (getSavedSyncCode() === code) forgetSyncCode();
+    this.setSyncStatus('🗑 云端配置已清除。', 'ok');
+  }
+
+  async handleSyncCopy() {
+    const code = this.syncCodeInput ? this.syncCodeInput.value.trim() : '';
+    if (!code) {
+      this.setSyncStatus('请先生成或输入同步码。', 'err');
+      return;
+    }
+
+    let copied = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        // 部分浏览器在无用户手势时会长时间挂起，加超时兜底避免状态卡住
+        const outcome = await Promise.race([
+          navigator.clipboard.writeText(code).then(() => 'ok').catch(() => 'fail'),
+          new Promise(resolve => setTimeout(() => resolve('timeout'), 1200))
+        ]);
+        copied = outcome === 'ok';
+      }
+    } catch (e) {
+      copied = false;
+    }
+    if (!copied) {
+      try {
+        this.syncCodeInput.select();
+        copied = document.execCommand('copy');
+      } catch (e) {
+        copied = false;
+      }
+    }
+
+    this.setSyncStatus(copied
+      ? `📋 同步码 ${code} 已复制，去手机浏览器粘贴即可。`
+      : `浏览器不允许自动复制，请手动记下同步码：${code}`, copied ? 'ok' : 'err');
+  }
+
+  /**
+   * 套用远端设置并同步到界面（opts.silent = 由调用方决定是否重开一局）
+   */
+  applyRemoteSettings(incoming, updatedAt, opts = {}) {
+    const beforeEngine = this.settings.aiEngine;
+    const beforeColor = Number(this.settings.playerColor);
+
+    this.settings = mergeSettings(this.settings, incoming);
+    this.persistSettings(Number(updatedAt) || Date.now());
+
+    sound.setMuted(this.settings.soundEnabled === false);
+    this.goban.options.showForbiddenMarks = this.settings.showForbiddenMarks !== false;
+
+    this.syncSettingsToUI();
+    this.updateSoundButton();
+    this.updateEngineBadge();
+    this.updateSideCard();
+
+    const changed = beforeEngine !== this.settings.aiEngine || beforeColor !== Number(this.settings.playerColor);
+    if (opts.silent || !changed) {
+      if (!this.replay.active) this.restoreLiveView();
+      return { changed };
+    }
+
+    if (this.gameStatus === 'playing' && this.moveHistory.length > 0) {
+      if (confirm('已套用云端配置，对弈模式或执棋方有变化，是否立即重新开局？')) {
+        this.startNewGame();
+      } else {
+        this.restoreLiveView();
+      }
+    } else {
+      this.startNewGame();
+    }
+    return { changed };
+  }
+
+  /**
+   * 开机静默自动拉取（仅当本机已绑定同步码且云端更新）
+   */
+  async autoPullSettings() {
+    if (!isAutoSyncEnabled()) return;
+    const code = getSavedSyncCode();
+    if (!code || !isValidSyncCode(code)) return;
+
+    if (this.statusTextEl) this.statusTextEl.textContent = '正在检查云端配置…';
+
+    const res = await pullSettings(code, { timeout: 3500 });
+    if (this.statusTextEl && /正在检查云端配置/.test(this.statusTextEl.textContent)) {
+      this.statusTextEl.textContent = '';
+    }
+
+    if (!res.ok) {
+      // 静默失败不打扰开局，但把原因留在同步状态区，用户打开设置可见
+      this.setSyncStatus(`开机自动拉取未成功：${res.error}`, 'err');
+      return;
+    }
+
+    const localUpdated = Number(this.settings.updatedAt) || 0;
+    if (res.updatedAt <= localUpdated) return; // 本机更新，保持不动
+
+    this.applyRemoteSettings(res.settings, res.updatedAt, { silent: true });
+    this.pendingSyncToast = `☁️ 已自动套用云端配置（${this.describeSettingsBrief(res.settings)}）`;
+  }
+
+  describeSettingsBrief(s) {
+    const src = s || {};
+    const engine = src.aiEngine === 'llm'
+      ? `大模型 ${(src.llmConfig && src.llmConfig.model) || '未填模型'}`
+      : (src.aiEngine === 'pvp' ? '双人同屏' : '本地算法');
+    const color = Number(src.playerColor) === 2 ? '执白后手' : '执黑先手';
+    return `${engine} · ${this.getDifficultyLabel(src.difficulty)} · ${color}`;
+  }
+
+  formatStamp(ms) {
+    const n = Number(ms);
+    if (!n) return '未知时间';
+    try {
+      return new Date(n).toLocaleString('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+      });
+    } catch (e) {
+      return '未知时间';
+    }
+  }
+
   openSettingsModal() {
     this.syncSettingsToUI();
+    this.syncSyncUi();
     this.settingsModal.classList.add('active');
   }
 

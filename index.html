@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
   <title>弈境五子棋 · AI 对弈平台 (Gomoku AI)</title>
   <meta name="description" content="在线五子棋对弈网页版，支持本地高难度算法与大模型(DeepSeek/Gemini/OpenAI)接入，先手三三四四禁手规则，悔棋与战绩保存。">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=2026.10.08b">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23222'/><circle cx='40' cy='38' r='10' fill='%23666'/></svg>">
   <script>
     (function() {
@@ -57,6 +57,7 @@
             <option value="low">入门低难度</option>
             <option value="medium" selected>业余中难度</option>
             <option value="high">大师高难度</option>
+            <option value="pro">职业级 (VCF杀棋)</option>
           </select>
         </div>
 
@@ -280,6 +281,9 @@
             <label class="radio-label">
               <input type="radio" name="cfgDifficulty" value="high"> 大师高难度 (Alpha-Beta深度搜索)
             </label>
+            <label class="radio-label">
+              <input type="radio" name="cfgDifficulty" value="pro"> 职业级 (VCF连续冲四杀 + 后台深度搜索，每步约1.5秒)
+            </label>
           </div>
         </div>
 
@@ -348,6 +352,38 @@
             <button type="button" id="btnTestLlm" class="btn btn-secondary">⚡ 测试模型连接</button>
             <span id="llmTestResult" class="test-result"></span>
           </div>
+        </div>
+
+        <!-- 跨设备配置同步 -->
+        <div id="syncSection" class="sync-box">
+          <h3 class="box-title">☁️ 跨设备同步配置</h3>
+          <p class="box-desc">
+            PC 上填好大模型后点「上传」得到一个同步码，手机浏览器输入同一串码点「拉取并套用」即可，省去在手机上敲长密钥。
+            只同步设置（含 API Key、难度、先后手、规则与音效），不同步棋谱与战绩；云端保存 30 天，可随时覆盖上传或清除。
+          </p>
+
+          <div class="form-group">
+            <label class="form-label" for="syncCodeInput">同步码：</label>
+            <div class="sync-code-row">
+              <input type="text" id="syncCodeInput" class="form-control sync-code-input" maxlength="16"
+                     placeholder="10 位字母数字，或点右侧「🎲 新建」" autocomplete="off"
+                     autocapitalize="characters" spellcheck="false">
+              <button type="button" id="btnSyncNewCode" class="btn btn-outline-sm" title="随机生成一个新同步码">🎲 新建</button>
+            </div>
+          </div>
+
+          <div class="sync-actions">
+            <button type="button" id="btnSyncUpload" class="btn btn-primary btn-sm" title="把本机当前设置上传到该同步码">⬆️ 上传本机设置</button>
+            <button type="button" id="btnSyncDownload" class="btn btn-info btn-sm" title="用该同步码的云端配置覆盖本机">⬇️ 拉取并套用</button>
+            <button type="button" id="btnSyncCopy" class="btn btn-ghost btn-sm" title="复制同步码">📋 复制码</button>
+            <button type="button" id="btnSyncDelete" class="btn btn-outline-danger btn-sm" title="删除云端保存的配置">🗑 清除云端</button>
+          </div>
+
+          <div id="syncStatus" class="sync-status"></div>
+
+          <label class="checkbox-label sync-auto-row">
+            <input type="checkbox" id="cfgSyncAuto" checked> 打开页面时自动拉取该同步码里更新过的配置（仅本机生效）
+          </label>
         </div>
       </div>
 
@@ -471,6 +507,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=2026.10.08b"></script>
 </body>
 </html>

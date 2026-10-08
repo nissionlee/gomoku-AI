@@ -1437,6 +1437,55 @@ body {
   cursor: not-allowed;
 }
 
+/* ================= 5.7 跨设备配置同步 ================= */
+.sync-box {
+  background: var(--bg-card);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.sync-code-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.sync-code-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sync-status {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  min-height: 1.2em;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.sync-status.ok { color: #73d13d; }
+.sync-status.err { color: #ff7875; }
+.sync-status.busy { color: var(--accent-gold-hover); }
+
+.sync-auto-row {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
 /* ================= 6. 响应式布局优化 ================= */
 @media (max-width: 900px) {
   .main-layout {

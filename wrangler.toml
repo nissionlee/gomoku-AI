@@ -1,3 +1,8 @@
 name = "gomoku-ai"
 pages_build_output_dir = "."
 compatibility_date = "2024-09-01"
+
+# 跨设备配置同步：/api/sync/<同步码> 读写此 KV 命名空间
+[[kv_namespaces]]
+binding = "SETTINGS_KV"
+id = "90c49f4cee934024ab6551d93a6a412c"
