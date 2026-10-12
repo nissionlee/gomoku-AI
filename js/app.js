@@ -791,9 +791,11 @@ class GomokuApp {
       return;
     }
 
-    // 双人模式每次只撤销 1 手（上一位玩家的落子）
-    // 人机模式下，若轮到玩家，需同时撤销 AI 和玩家各 1 手 (共2手)
-    const stepsToUndo = this.isPvP() ? 1 : (this.turn === this.playerColor ? 2 : 1);
+    // 悔棋语义：撤销「双方最近一轮」，把回合还给当前该下的一方重新落子。
+    // - 双人同屏：撤 2 手（对手 1 手 + 自己 1 手）。若只撤 1 手，回合会落到对手身上，
+    //   当前玩家就从先手变成后手，等于没悔成自己那一步。
+    // - 人机模式：轮到玩家时撤 2 手（AI 1 手 + 玩家 1 手）；若轮到 AI 则撤 1 手。
+    const stepsToUndo = (this.isPvP() || this.turn === this.playerColor) ? 2 : 1;
 
     for (let i = 0; i < stepsToUndo; i++) {
       if (this.moveHistory.length === 0) break;
@@ -826,7 +828,7 @@ class GomokuApp {
     this.updateReplayUI();
     this.updateStatus();
     this.showToast(this.isPvP()
-      ? `已撤销上一步，轮到【${this.turn === BLACK ? '黑方' : '白方'}】落子`
+      ? `已撤销双方最近一轮，轮到【${this.turn === BLACK ? '黑方' : '白方'}】重新落子`
       : '悔棋成功，请重新落子');
   }
 

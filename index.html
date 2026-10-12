@@ -117,7 +117,7 @@
           <button id="btnNewGame" class="btn btn-primary" title="重新开始一局">
             <span class="btn-icon-text">🔄</span> 重新开局
           </button>
-          <button id="btnUndo" class="btn btn-warning" title="悔棋（撤销双方最近一手）">
+          <button id="btnUndo" class="btn btn-warning" title="悔棋（撤销双方最近一轮，回到自己重新落子）">
             <span class="btn-icon-text">↩️</span> 悔棋
           </button>
           <button id="btnHint" class="btn btn-info" title="AI 为你提示当前最优落子点">
@@ -212,7 +212,7 @@
           <h4>💡 下棋小贴士</h4>
           <ul class="tips-list">
             <li><strong>先手禁手：</strong>执黑先行存在三三、四四禁手规则，同时形成两个活三或两个四将被判定违规。</li>
-            <li><strong>悔棋功能：</strong>点击“悔棋”即可退回上一步，方便深思复盘。</li>
+            <li><strong>悔棋功能：</strong>点击“悔棋”会撤销双方最近一轮走子（对手 1 手 + 自己 1 手），回到自己重新落子，方便深思复盘。</li>
             <li><strong>逐手复盘：</strong>“落子轨迹”可回放任意一手并自动连线显示落子顺序，“棋局分析”则给出该手评分、是否最优与更推荐下法；旧对局在“战绩记录”里点“复盘”同样可查。</li>
             <li><strong>大模型对战：</strong>可在“设置”中填入 DeepSeek、Gemini、通义千问等 API Key，开启智能人设立体对弈！</li>
             <li><strong>云端免费部署：</strong>静态无缝托管于 Cloudflare Pages，手机电脑皆可畅玩。</li>
