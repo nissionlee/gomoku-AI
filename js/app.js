@@ -2128,6 +2128,30 @@ class GomokuApp {
     }
   }
 
+  /**
+   * 渲染模型体检报告（多行，按级别着色）
+   * @param {Array<{level:'ok'|'warn'|'fail'|'testing', text:string}>} lines
+   */
+  renderTestResult(lines) {
+    const el = document.getElementById('llmTestResult');
+    if (!el) return;
+
+    const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ));
+    const validLevels = ['ok', 'warn', 'fail', 'testing'];
+
+    el.innerHTML = (lines || []).map((line) => {
+      const level = validLevels.indexOf(line.level) !== -1 ? line.level : 'ok';
+      return '<div class="test-result-line">' +
+        `<span class="test-result-dot level-${level}"></span>` +
+        `<span class="test-result-text level-${level}">${esc(line.text)}</span>` +
+        '</div>';
+    }).join('');
+
+    el.classList.add('visible');
+  }
+
   initSettingsModalEvents() {
     // 引擎切换
     document.querySelectorAll('input[name="cfgAiEngine"]').forEach(radio => {
@@ -2154,21 +2178,37 @@ class GomokuApp {
       btnToggleKey.textContent = inputKey.type === 'password' ? '👁️ 显示' : '🔒 隐藏';
     });
 
-    // 测试连接按键
+    // 模型体检按键：连通握手 + 真实对弈负载实测
     const btnTestLlm = document.getElementById('btnTestLlm');
-    const testResultEl = document.getElementById('llmTestResult');
     btnTestLlm?.addEventListener('click', async () => {
       const config = {
         baseUrl: document.getElementById('cfgLlmBaseUrl').value,
         apiKey: document.getElementById('cfgLlmApiKey').value,
-        model: document.getElementById('cfgLlmModel').value
+        model: document.getElementById('cfgLlmModel').value,
+        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous'
       };
-      testResultEl.textContent = '正在发起测试握手...';
-      testResultEl.className = 'test-result testing';
 
-      const res = await testLLMConnection(config);
-      testResultEl.textContent = res.message;
-      testResultEl.className = `test-result ${res.success ? 'success' : 'fail'}`;
+      btnTestLlm.disabled = true;
+      this.renderTestResult([{ level: 'testing', text: '阶段一：正在发起握手…' }]);
+
+      try {
+        const res = await testLLMConnection(config, {
+          board: this.board,
+          onProgress: (p) => {
+            const sec = Math.max(1, Math.round(p.elapsedMs / 1000));
+            const label = p.phase === 'reasoning' ? '模型正在推理' : '模型正在输出落子';
+            this.renderTestResult([{
+              level: 'testing',
+              text: `阶段二：${label}… 已等待 ${sec}s · 接收 ${p.chars} 字`
+            }]);
+          }
+        });
+        this.renderTestResult(res.lines);
+      } catch (err) {
+        this.renderTestResult([{ level: 'fail', text: `检测异常：${(err && err.message) || err}` }]);
+      } finally {
+        btnTestLlm.disabled = false;
+      }
     });
 
     // 保存设置按钮

@@ -720,19 +720,56 @@ body {
 
 .test-result {
   font-size: 0.85rem;
+  line-height: 1.55;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  display: none;
 }
 
-.test-result.testing {
-  color: #faad14;
+.test-result.visible {
+  display: block;
 }
 
-.test-result.success {
-  color: #52c41a;
+.test-result-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 7px;
 }
 
-.test-result.fail {
-  color: #ff4d4f;
+.test-result-line:last-child {
+  margin-bottom: 0;
 }
+
+.test-result-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+  background: #8c8c8c;
+}
+
+.test-result-dot.level-ok { background: #52c41a; }
+.test-result-dot.level-warn { background: #faad14; }
+.test-result-dot.level-fail { background: #ff4d4f; }
+
+.test-result-dot.level-testing {
+  background: #faad14;
+  animation: pulse-text 1.2s infinite;
+}
+
+.test-result-text {
+  flex: 1;
+}
+
+.test-result-text.level-ok { color: #73d13d; }
+.test-result-text.level-warn { color: #ffc53d; }
+.test-result-text.level-fail { color: #ff7875; }
+.test-result-text.level-testing { color: #faad14; }
 
 /* 战绩面板网格 */
 .stats-grid {

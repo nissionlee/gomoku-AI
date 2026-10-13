@@ -3,8 +3,8 @@
  * 支持 OpenAI 兼容格式 (DeepSeek, OpenAI, Gemini, 阿里通义千问, Kimi, Ollama, 自定义等)
  */
 
-import { coordToNotation, notationToCoord } from './engine.js';
-import { inBoard, EMPTY } from './rules.js';
+import { coordToNotation, notationToCoord, getCandidateMoves } from './engine.js';
+import { inBoard, EMPTY, BLACK, WHITE } from './rules.js';
 
 export const PROVIDER_PRESETS = {
   deepseek: {
@@ -350,23 +350,8 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
       };
     }
 
-    // 解析 JSON
-    let parsed = null;
-    try {
-      // 清理可能包含的 markdown 标签
-      const jsonStr = content.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
-      parsed = JSON.parse(jsonStr);
-    } catch (e) {
-      // 正则尝试匹配 coord 和 comment
-      const coordMatch = content.match(/"coord"\s*:\s*"([A-O](?:[1-9]|1[0-5]))"/i);
-      const commentMatch = content.match(/"comment"\s*:\s*"([^"]+)"/i);
-      if (coordMatch) {
-        parsed = {
-          coord: coordMatch[1].toUpperCase(),
-          comment: commentMatch ? commentMatch[1] : '看我这一手！'
-        };
-      }
-    }
+    // 解析 JSON（与体检探测共用同一套容错解析）
+    const parsed = parseMoveJson(content);
 
     if (parsed && parsed.coord) {
       const coord = notationToCoord(parsed.coord);
@@ -430,49 +415,357 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
 }
 
 /**
- * 测试大模型 API 连接状态
+ * 从模型输出中解析落子 JSON（容忍 markdown 包裹与格式瑕疵）
+ * @returns {{coord?: string, comment?: string}|null}
  */
-export async function testLLMConnection(config) {
+function parseMoveJson(content) {
+  if (!content) return null;
+  try {
+    const jsonStr = content.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
+    if (parsed && parsed.coord) return parsed;
+  } catch (e) {
+    /* 落到下面的正则兜底 */
+  }
+  const coordMatch = content.match(/"coord"\s*:\s*"([A-O](?:[1-9]|1[0-5]))"/i);
+  if (!coordMatch) return null;
+  const commentMatch = content.match(/"comment"\s*:\s*"([^"]+)"/i);
+  return {
+    coord: coordMatch[1].toUpperCase(),
+    comment: commentMatch ? commentMatch[1] : ''
+  };
+}
+
+/**
+ * 统计盘面棋子数
+ */
+function countStones(board) {
+  let total = 0;
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (board[r][c] !== EMPTY) total++;
+    }
+  }
+  return total;
+}
+
+/**
+ * 内置中盘基准局面：空盘或开局阶段也能做一次有代表性的真实负载探测
+ */
+function buildProbeBoard() {
+  const board = Array.from({ length: 15 }, () => Array(15).fill(EMPTY));
+  const stones = [
+    ['H8', BLACK], ['I9', WHITE], ['H9', BLACK], ['I8', WHITE],
+    ['G9', BLACK], ['G8', WHITE], ['F9', BLACK], ['J8', WHITE]
+  ];
+  for (const [notation, color] of stones) {
+    const coord = notationToCoord(notation);
+    if (coord) board[coord[0]][coord[1]] = color;
+  }
+  return board;
+}
+
+/**
+ * 按 HTTP 状态码归类错误，给出可操作的提示
+ */
+function describeHttpError(status, errText) {
+  const snippet = String(errText || '').replace(/\s+/g, ' ').slice(0, 100);
+  if (status === 401 || status === 403) {
+    return { level: 'fail', text: `鉴权失败 [${status}]：API Key 无效、已过期或无该模型权限` };
+  }
+  if (status === 404) {
+    return { level: 'fail', text: `接口或模型不存在 [404]：请核对 Base URL 与模型名称` };
+  }
+  if (status === 429) {
+    return { level: 'fail', text: `触发限流 [429]：请求过于频繁或额度耗尽，稍后重试` };
+  }
+  if (status === 400) {
+    return { level: 'fail', text: `请求被拒 [400]：多为模型名不存在或参数不受支持 —— ${snippet}` };
+  }
+  if (status >= 500) {
+    return { level: 'fail', text: `服务端错误 [${status}]：${snippet}` };
+  }
+  return { level: 'fail', text: `请求失败 [${status}]：${snippet}` };
+}
+
+/**
+ * 依据实测数据给出对弈性能结论
+ */
+function buildVerdict(meta) {
+  const totalSec = (meta.totalMs || 0) / 1000;
+  if (meta.isReasoningModel && totalSec > 20) {
+    return {
+      kind: 'reasoning-slow',
+      level: 'warn',
+      text: `结论：推理型模型，单步实测 ${totalSec.toFixed(1)} 秒，对弈会有明显等待（已有超时保护，45 秒无响应会自动改由本地引擎代下）`
+    };
+  }
+  if (totalSec > 15) {
+    return {
+      kind: 'slow',
+      level: 'warn',
+      text: `结论：单步实测 ${totalSec.toFixed(1)} 秒，偏慢，建议改用更快的对话型模型`
+    };
+  }
+  return {
+    kind: 'fast',
+    level: 'ok',
+    text: `结论：预估单步约 ${totalSec.toFixed(1)} 秒，对弈流畅`
+  };
+}
+
+/**
+ * 大模型连接与对弈性能体检
+ * 阶段一：极简握手，快速判定网络 / 鉴权 / 模型名
+ * 阶段二：复用真实对弈路径（buildPrompt + 流式 + 双超时）实测落子性能
+ * @param {Object} config { baseUrl, apiKey, model, persona }
+ * @param {Object} [options]
+ *   board               探测用棋盘（默认取当前盘面，不足 3 手则用内置基准局面）
+ *   onProgress          阶段二进度回调 ({ elapsedMs, chars, phase })
+ *   handshakeTimeoutMs  阶段一超时（默认 12000）
+ *   idleTimeoutMs       阶段二空闲超时（默认 45000，与对弈一致）
+ *   totalTimeoutMs      阶段二总超时（默认 180000，与对弈一致）
+ * @returns {Promise<{ success: boolean, message: string, lines: Array<{level:string,text:string}>, meta: Object }>}
+ */
+export async function testLLMConnection(config, options = {}) {
+  const lines = [];
+  const meta = {
+    model: config.model || 'deepseek-chat',
+    handshakeMs: null,
+    firstByteMs: null,
+    totalMs: null,
+    streamSupported: null,
+    isReasoningModel: false,
+    usedCurrentBoard: false,
+    coord: null
+  };
+
   if (!config.apiKey || !config.apiKey.trim()) {
-    return { success: false, message: '请先填写 API Key' };
+    lines.push({ level: 'fail', text: '尚未填写 API Key' });
+    return { success: false, message: '请先填写 API Key', lines, meta };
   }
 
   let cleanBaseUrl = (config.baseUrl || '').trim().replace(/\/+$/, '');
+  if (!cleanBaseUrl) cleanBaseUrl = PROVIDER_PRESETS.deepseek.baseUrl;
   const endpoint = `${cleanBaseUrl}/chat/completions`;
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${config.apiKey.trim()}`
+  };
+
+  /* ================= 阶段一：极简握手 ================= */
+  const handshakeTimeoutMs = Number.isFinite(options.handshakeTimeoutMs) ? options.handshakeTimeoutMs : 12000;
+  const handshakeStart = Date.now();
+  let handshakeResponse;
 
   try {
-    const start = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), handshakeTimeoutMs);
+    handshakeResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: authHeaders,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: meta.model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 5
+      })
+    });
+    clearTimeout(timer);
+  } catch (err) {
+    const isTimeout = !!(err && err.name === 'AbortError');
+    lines.push({
+      level: 'fail',
+      text: isTimeout
+        ? `握手超时（${Math.round(handshakeTimeoutMs / 1000)} 秒无响应）：请检查 Base URL 与本机网络`
+        : `网络不可达：${(err && err.message) || '跨域限制或无法访问该地址'}`
+    });
+    return { success: false, message: lines[0].text, lines, meta };
+  }
+
+  meta.handshakeMs = Date.now() - handshakeStart;
+
+  if (!handshakeResponse.ok) {
+    const errText = await handshakeResponse.text().catch(() => '');
+    lines.push(describeHttpError(handshakeResponse.status, errText));
+    return { success: false, message: lines[0].text, lines, meta };
+  }
+
+  try {
+    const data = await handshakeResponse.json();
+    const echo = data.choices?.[0]?.message?.content;
+    if (echo) meta.modelEcho = String(echo).trim().slice(0, 20);
+  } catch (e) {
+    /* 少数服务端握手返回体不规范，不阻塞后续探测 */
+  }
+
+  lines.push({
+    level: 'ok',
+    text: `连通正常 · 鉴权通过 · 模型 ${meta.model} 可用（握手 ${meta.handshakeMs}ms）`
+  });
+
+  /* ================= 阶段二：真实负载探测 ================= */
+  const useCurrentBoard = !!(options.board && countStones(options.board) >= 3);
+  const probeBoard = useCurrentBoard ? options.board : buildProbeBoard();
+  meta.usedCurrentBoard = useCurrentBoard;
+
+  const candidates = getCandidateMoves(probeBoard, BLACK, 5, false);
+  const { systemPrompt, userPrompt } = buildPrompt(probeBoard, BLACK, [], candidates, config.persona);
+
+  lines.push({
+    level: 'ok',
+    text: `探测棋局：${useCurrentBoard ? '当前盘面' : '内置基准局面'}（候选点 ${candidates.length} 个）`
+  });
+
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : 45000;
+  const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs) ? options.totalTimeoutMs : 180000;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+
+  const probeStart = Date.now();
+  const controller = new AbortController();
+  let abortCause = null;
+  let idleTimer = null;
+  let totalTimer = null;
+  let firstByteMs = null;
+  let sawStream = false;
+  let content = '';
+  let reasoning = '';
+
+  const clearTimers = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (totalTimer) clearTimeout(totalTimer);
+    idleTimer = null;
+    totalTimer = null;
+  };
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      abortCause = 'idle';
+      controller.abort();
+    }, idleTimeoutMs);
+  };
+
+  try {
+    armIdle();
+    totalTimer = setTimeout(() => {
+      abortCause = 'total';
+      controller.abort();
+    }, totalTimeoutMs);
+
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey.trim()}`
-      },
+      headers: authHeaders,
+      signal: controller.signal,
       body: JSON.stringify({
-        model: config.model || 'deepseek-chat',
+        model: meta.model,
         messages: [
-          { role: 'user', content: '请回复一个字：好' }
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
         ],
-        max_tokens: 10
+        max_tokens: 250,
+        stream: true
       })
     });
 
-    const elapsed = Date.now() - start;
-
     if (!response.ok) {
-      const errText = await response.text();
-      return { success: false, message: `连接失败 [${response.status}]: ${errText.slice(0, 120)}` };
+      const errText = await response.text().catch(() => '');
+      clearTimers();
+      const desc = describeHttpError(response.status, errText);
+      lines.push({ level: 'warn', text: `对弈路径请求失败 —— ${desc.text}` });
+      return { success: false, message: desc.text, lines, meta };
     }
 
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || 'ok';
-    return {
-      success: true,
-      message: `连接成功！响应耗时 ${elapsed}ms，模型回复：“${reply.trim()}”`
-    };
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+
+    if (contentType.indexOf('text/event-stream') !== -1 && response.body) {
+      sawStream = true;
+      const streamed = await consumeChatStream(response, {
+        onIdle: () => {
+          if (firstByteMs === null) firstByteMs = Date.now() - probeStart;
+          armIdle();
+        },
+        onDelta: (snapshot) => {
+          if (firstByteMs === null) firstByteMs = Date.now() - probeStart;
+          if (onProgress) {
+            onProgress({
+              elapsedMs: Date.now() - probeStart,
+              chars: snapshot.content.length + snapshot.reasoning.length,
+              phase: snapshot.phase
+            });
+          }
+          return true;
+        }
+      });
+      content = streamed.content;
+      reasoning = streamed.reasoning;
+    } else {
+      const data = await response.json();
+      const message = data.choices?.[0]?.message || {};
+      content = message.content || '';
+      reasoning = message.reasoning_content || '';
+      firstByteMs = Date.now() - probeStart;
+    }
+
+    clearTimers();
   } catch (err) {
-    return { success: false, message: `网络错误：${err.message || '跨域限制或无法访问该地址'}` };
+    clearTimers();
+    if (abortCause === 'idle' || abortCause === 'total') {
+      const waitSec = Math.round((abortCause === 'idle' ? idleTimeoutMs : totalTimeoutMs) / 1000);
+      lines.push({
+        level: 'warn',
+        text: `真实落子探测超时（${waitSec} 秒无响应）—— 对弈时同样会触发超时并改由本地引擎代下`
+      });
+      return { success: false, message: lines[lines.length - 1].text, lines, meta };
+    }
+    lines.push({ level: 'fail', text: `探测中断：${(err && err.message) || '未知错误'}` });
+    return { success: false, message: lines[lines.length - 1].text, lines, meta };
   }
+
+  meta.firstByteMs = firstByteMs;
+  meta.totalMs = Date.now() - probeStart;
+  meta.streamSupported = sawStream;
+  meta.isReasoningModel = reasoning.length > 0;
+
+  lines.push(sawStream
+    ? { level: 'ok', text: '流式输出可用（SSE）' }
+    : { level: 'warn', text: '服务端未返回 SSE，已自动按非流式解析（对弈仍可用，但看不到思考进度）' });
+
+  if (meta.isReasoningModel) {
+    lines.push({
+      level: 'warn',
+      text: `检测到思维链（${reasoning.length} 字），属推理型模型 —— 简单请求很快，棋局越复杂思考越久`
+    });
+  }
+
+  const firstByteText = firstByteMs === null ? '—' : `${(firstByteMs / 1000).toFixed(1)}s`;
+  lines.push({
+    level: 'ok',
+    text: `首字节 ${firstByteText} · 完整落子 ${(meta.totalMs / 1000).toFixed(1)}s`
+  });
+
+  const parsed = parseMoveJson(content);
+  if (parsed && parsed.coord) {
+    const coord = notationToCoord(parsed.coord);
+    if (coord && inBoard(coord[0], coord[1])) {
+      meta.coord = parsed.coord.toUpperCase();
+      lines.push({ level: 'ok', text: `返回格式合法，落子建议 ${meta.coord}` });
+    } else {
+      lines.push({ level: 'warn', text: `模型返回坐标 ${parsed.coord} 越界，对弈时会自动校准为本地候选点` });
+    }
+  } else {
+    lines.push({ level: 'warn', text: '模型未按要求返回 JSON 坐标，对弈时将改由本地引擎候选点兜底' });
+  }
+
+  const verdict = buildVerdict(meta);
+  meta.verdict = verdict.kind;
+  lines.push({ level: verdict.level, text: verdict.text });
+
+  return {
+    success: true,
+    message: verdict.text,
+    lines,
+    meta
+  };
 }
 
 /**
