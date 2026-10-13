@@ -523,17 +523,31 @@ class GomokuApp {
         chosenMove = { r: 7, c: 7, notation: 'H8' };
         aiComment = '天元启手，先占中宫！';
       } else if (this.settings.aiEngine === 'llm') {
-        // 大模型对弈
+        // 大模型对弈：流式输出 + 双超时，实时反馈思考进度
         const candidates = getCandidateMoves(this.board, this.aiColor, 5, this.aiColor === BLACK && this.isForbiddenRuleOn());
         const llmResult = await getLLMMove(
           this.settings.llmConfig,
           this.board,
           this.aiColor,
           this.moveHistory,
-          candidates
+          candidates,
+          {
+            onProgress: (progress) => {
+              // 本局已结束或已切局 → 返回 false 通知上游中止流
+              if (this.gameStatus !== 'playing') return false;
+              this.renderLLMProgress(progress);
+              return true;
+            }
+          }
         );
+
         chosenMove = { r: llmResult.r, c: llmResult.c, notation: llmResult.notation };
         aiComment = llmResult.comment;
+
+        if (llmResult.timedOut) {
+          const waited = Math.round((llmResult.elapsedMs || 0) / 1000);
+          this.showToast(`⏱️ 大模型 ${waited} 秒无响应，已改由本地引擎代下这一手`);
+        }
       } else if (this.settings.difficulty === 'pro') {
         // 职业级：Web Worker 后台深度搜索（VCF 杀棋 + 迭代加深），主线程不卡
         this.statusTextEl.textContent = 'AI 职业级深度思考中…';
@@ -590,6 +604,31 @@ class GomokuApp {
       this.updateStatus();
     } finally {
       this.statusTextEl.classList.remove('ai-thinking');
+      if (this.aiSpeechBubbleEl) this.aiSpeechBubbleEl.classList.remove('llm-streaming');
+    }
+  }
+
+  /**
+   * 渲染大模型流式思考进度
+   * 状态栏显示计时与已接收字数（跳动的数字 = 模型还活着），气泡滚动显示最新输出片段
+   * @param {{phase:'reasoning'|'answer', text:string, contentChars:number, reasoningChars:number, elapsedMs:number}} progress
+   */
+  renderLLMProgress(progress) {
+    const sec = Math.max(1, Math.round((progress.elapsedMs || 0) / 1000));
+    const totalChars = (progress.contentChars || 0) + (progress.reasoningChars || 0);
+    const phaseLabel = progress.phase === 'reasoning' ? '深度推演中' : '正在组织落子';
+
+    if (this.statusTextEl) {
+      this.statusTextEl.textContent = `AI ${phaseLabel}… 已用 ${sec}s · 接收 ${totalChars} 字`;
+    }
+
+    if (this.aiSpeechBubbleEl) {
+      this.aiSpeechBubbleEl.classList.add('llm-streaming');
+    }
+    if (this.aiSpeechTextEl && progress.text) {
+      const limit = 80;
+      const tail = progress.text.slice(-limit).replace(/\s+/g, ' ').trim();
+      this.aiSpeechTextEl.textContent = (progress.text.length > limit ? '…' : '') + tail;
     }
   }
 

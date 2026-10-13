@@ -486,6 +486,17 @@ body {
   min-height: 60px;
 }
 
+/* 大模型流式输出中：气泡用虚线边框 + 斜体，区分「正在书写」与「已定稿」 */
+.ai-speech-bubble.llm-streaming {
+  border-style: dashed;
+  border-color: var(--accent-gold);
+}
+
+.ai-speech-bubble.llm-streaming p {
+  opacity: 0.85;
+  font-style: italic;
+}
+
 .bubble-arrow {
   position: absolute;
   top: -8px;

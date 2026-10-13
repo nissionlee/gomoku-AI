@@ -121,22 +121,105 @@ function buildPrompt(board, myColor, history, candidates, personaKey = 'humorous
 }
 
 /**
- * 调用大模型 API 进行对弈落子
+ * 消费 OpenAI 兼容的 SSE 流式响应
+ * 逐块解析 delta.reasoning_content（推理型模型的思考链）与 delta.content（最终答案）
+ * @param {Response} response fetch 返回的流式响应
+ * @param {{ onIdle?: Function, onDelta?: Function }} handlers
+ *   onIdle() 每收到一个数据块调用一次（用于重置空闲超时）
+ *   onDelta({ content, reasoning, phase }) 内容有更新时调用；返回 false 表示要求中止
+ * @returns {Promise<{ content: string, reasoning: string, cancelled: boolean }>}
+ */
+export async function consumeChatStream(response, handlers = {}) {
+  const { onIdle, onDelta } = handlers;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let reasoning = '';
+  let cancelled = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      if (onIdle) onIdle();
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // 末行可能被截断，留到下一轮再拼
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.indexOf('data:') !== 0) continue;
+
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+
+        let json;
+        try {
+          json = JSON.parse(payload);
+        } catch (e) {
+          continue; // 心跳包或半截数据，直接跳过
+        }
+
+        const delta = json.choices && json.choices[0] && json.choices[0].delta;
+        if (!delta) continue;
+
+        let changed = false;
+        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+          reasoning += delta.reasoning_content;
+          changed = true;
+        }
+        if (typeof delta.content === 'string' && delta.content) {
+          content += delta.content;
+          changed = true;
+        }
+
+        if (changed && onDelta) {
+          const keepGoing = onDelta({ content, reasoning, phase: content ? 'answer' : 'reasoning' });
+          if (keepGoing === false) {
+            cancelled = true;
+            break;
+          }
+        }
+      }
+
+      if (cancelled) break;
+    }
+  } finally {
+    if (cancelled) {
+      try { await reader.cancel(); } catch (e) { /* 流已关闭，忽略 */ }
+    }
+  }
+
+  return { content, reasoning, cancelled };
+}
+
+/**
+ * 调用大模型 API 进行对弈落子（流式 + 双超时）
  * @param {Object} config API 配置 { provider, baseUrl, apiKey, model, persona }
  * @param {number[][]} board 棋盘状态
  * @param {number} myColor AI 棋子颜色
  * @param {Array} history 落子历史
  * @param {Array} candidates 本地引擎预选点
- * @returns {Promise<{ r: number, c: number, notation: string, comment: string, isFallback: boolean }>}
+ * @param {Object} [options]
+ *   onProgress({ phase, text, contentChars, reasoningChars, elapsedMs }) 流式进度回调，返回 false 可中止
+ *   idleTimeoutMs  空闲超时：多久收不到数据算卡死（默认 45000）
+ *   totalTimeoutMs 总超时：整轮硬上限（默认 180000）
+ * @returns {Promise<{ r: number, c: number, notation: string, comment: string, isFallback: boolean,
+ *                     timedOut?: boolean, cancelled?: boolean, elapsedMs: number, reasoning?: string }>}
  */
-export async function getLLMMove(config, board, myColor, history, candidates) {
+export async function getLLMMove(config, board, myColor, history, candidates, options = {}) {
   const fallbackMove = candidates[0] || { r: 7, c: 7, notation: 'H8' };
-  
+  const startedAt = Date.now();
+
   if (!config.apiKey || config.apiKey.trim() === '') {
     return {
       ...fallbackMove,
       comment: '（未配置 API Key，已切换为本地智能落子）',
-      isFallback: true
+      isFallback: true,
+      elapsedMs: 0
     };
   }
 
@@ -148,36 +231,124 @@ export async function getLLMMove(config, board, myColor, history, candidates) {
   }
   const endpoint = `${cleanBaseUrl}/chat/completions`;
 
+  const modelName = config.model || 'deepseek-chat';
+  // 推理型模型的思考链不受 max_tokens 约束，且部分服务商要求 temperature 必须为 1.0
+  const isReasoningModel = /reasoner|thinking|qwq|\br1\b|\bo1\b|\bo3\b/i.test(modelName);
+
+  // 双超时：空闲超时（多久收不到数据算卡死）+ 总超时（整轮硬上限）
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : 45000;
+  const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs) ? options.totalTimeoutMs : 180000;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+
+  const controller = new AbortController();
+  let abortCause = null; // 'idle' | 'total'
+  let idleTimer = null;
+  let totalTimer = null;
+
+  const clearTimers = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (totalTimer) clearTimeout(totalTimer);
+    idleTimer = null;
+    totalTimer = null;
+  };
+  const armIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      abortCause = 'idle';
+      controller.abort();
+    }, idleTimeoutMs);
+  };
+  const emit = (snapshot) => {
+    if (!onProgress) return true;
+    return onProgress({ ...snapshot, elapsedMs: Date.now() - startedAt });
+  };
+
   try {
+    armIdleTimer();
+    totalTimer = setTimeout(() => {
+      abortCause = 'total';
+      controller.abort();
+    }, totalTimeoutMs);
+
+    const requestBody = {
+      model: modelName,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      max_tokens: 250,
+      stream: true
+    };
+    if (!isReasoningModel) {
+      requestBody.temperature = 0.7;
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${config.apiKey.trim()}`
       },
-      body: JSON.stringify({
-        model: config.model || 'deepseek-chat',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 250
-      })
+      signal: controller.signal,
+      body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
       const errText = await response.text();
       console.warn('LLM API request failed:', response.status, errText);
+      clearTimers();
       return {
         ...fallbackMove,
         comment: `（API 响应异常 ${response.status}，已由本地引擎执棋）`,
-        isFallback: true
+        isFallback: true,
+        elapsedMs: Date.now() - startedAt
       };
     }
 
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    let content = '';
+    let reasoning = '';
+    let cancelled = false;
+
+    if (contentType.indexOf('text/event-stream') !== -1 && response.body) {
+      const streamed = await consumeChatStream(response, {
+        onIdle: armIdleTimer,
+        onDelta: (snapshot) => emit({
+          phase: snapshot.phase,
+          text: snapshot.content || snapshot.reasoning,
+          contentChars: snapshot.content.length,
+          reasoningChars: snapshot.reasoning.length
+        })
+      });
+      content = streamed.content;
+      reasoning = streamed.reasoning;
+      cancelled = streamed.cancelled;
+    } else {
+      // 兜底：服务端忽略了 stream 参数，按一次性 JSON 响应处理
+      const data = await response.json();
+      const message = data.choices?.[0]?.message || {};
+      content = message.content || '';
+      reasoning = message.reasoning_content || '';
+      emit({
+        phase: 'answer',
+        text: content,
+        contentChars: content.length,
+        reasoningChars: reasoning.length
+      });
+    }
+
+    clearTimers();
+    const elapsedMs = Date.now() - startedAt;
+
+    if (cancelled) {
+      return {
+        ...fallbackMove,
+        comment: '（本局已结束，大模型请求已中止）',
+        isFallback: true,
+        cancelled: true,
+        elapsedMs
+      };
+    }
 
     // 解析 JSON
     let parsed = null;
@@ -206,7 +377,9 @@ export async function getLLMMove(config, board, myColor, history, candidates) {
           c: coord[1],
           notation: parsed.coord.toUpperCase(),
           comment: parsed.comment || '看我这一手！',
-          isFallback: false
+          isFallback: false,
+          elapsedMs,
+          reasoning
         };
       }
     }
@@ -215,15 +388,43 @@ export async function getLLMMove(config, board, myColor, history, candidates) {
     return {
       ...fallbackMove,
       comment: parsed?.comment || '（大模型推荐点已被占用，智能校准为最优手）',
-      isFallback: false
+      isFallback: false,
+      elapsedMs,
+      reasoning
     };
 
   } catch (error) {
+    clearTimers();
+    const elapsedMs = Date.now() - startedAt;
+
+    if (abortCause === 'idle' || abortCause === 'total') {
+      const waitSec = Math.round((abortCause === 'idle' ? idleTimeoutMs : totalTimeoutMs) / 1000);
+      return {
+        ...fallbackMove,
+        comment: `（大模型 ${waitSec} 秒无响应已超时，改由本地引擎落子）`,
+        isFallback: true,
+        timedOut: true,
+        timeoutKind: abortCause,
+        elapsedMs
+      };
+    }
+
+    if (error && error.name === 'AbortError') {
+      return {
+        ...fallbackMove,
+        comment: '（大模型请求已中止）',
+        isFallback: true,
+        cancelled: true,
+        elapsedMs
+      };
+    }
+
     console.error('LLM Fetch Error:', error);
     return {
       ...fallbackMove,
       comment: '（网络连接异常，已由本地智能引擎落子）',
-      isFallback: true
+      isFallback: true,
+      elapsedMs
     };
   }
 }
