@@ -423,6 +423,8 @@ class GomokuApp {
   showLobby() {
     const lobby = document.getElementById('lobbyOverlay');
     if (lobby) lobby.hidden = false;
+    // 回到大厅 = 不在对局中，恢复顶部导航与战绩横幅
+    this.syncGameChrome();
     this.bindLobbyEventsOnce();
     this.refreshLobby();
   }
@@ -622,6 +624,8 @@ class GomokuApp {
   leaveToLobby() {
     this.onlineGame = null;
     this.stopPolling();
+    // 离开对局 → 不再算「对局中」，顶部导航与战绩横幅恢复
+    this.gameStatus = 'idle';
     this.showLobby();
   }
 
@@ -1496,6 +1500,7 @@ class GomokuApp {
 
     if (winResult.win) {
       this.gameStatus = 'ended';
+      this.syncGameChrome();
       this.winner = lastColor;
       this.winningLine = winResult.winLine;
       this.stopTimer();
@@ -1563,6 +1568,7 @@ class GomokuApp {
 
     if (isBoardFull(this.board)) {
       this.gameStatus = 'ended';
+      this.syncGameChrome();
       this.winner = 'draw';
       this.stopTimer();
       this.goban.setLocked(true);
@@ -1767,6 +1773,7 @@ class GomokuApp {
       const winPlayer = this.turn === BLACK ? '白方' : '黑方';
       if (confirm(`当前轮到【${resignPlayer}】落子，确定要认输吗？`)) {
         this.gameStatus = 'ended';
+        this.syncGameChrome();
         this.winner = this.turn === BLACK ? WHITE : BLACK;
         this.stopTimer();
         sound.playWin();
@@ -1790,6 +1797,7 @@ class GomokuApp {
 
     if (confirm('确定要认输本局吗？')) {
       this.gameStatus = 'ended';
+      this.syncGameChrome();
       this.winner = this.aiColor;
       this.stopTimer();
       sound.playLose();
@@ -2800,7 +2808,33 @@ class GomokuApp {
   /**
    * 更新游戏状态栏显示
    */
+  /**
+   * 对局中收窄顶部：压薄导航栏 + 收起战绩横幅，把省下的纵向空间让给棋盘。
+   *
+   * 棋盘是正方形，尺寸上限 = min(容器宽度, 视口高度 − 顶部占用)，在 16:9 桌面上
+   * 几乎总是被视口高度卡住，所以「省高度」就等于「放大棋盘」。
+   * 具体样式见 css/style.css 的 body.in-game 规则；board.js 的
+   * reservedViewportHeight() 会实测这些元素的高度，无需两边写死同一个数字。
+   */
+  syncGameChrome() {
+    const inGame = this.gameStatus === 'playing';
+    const body = document.body;
+    if (!body || body.classList.contains('in-game') === inGame) return;
+
+    body.classList.toggle('in-game', inGame);
+
+    // 等浏览器把新布局算完再量尺寸；再补一帧兜住字体/行高带来的细微变化
+    requestAnimationFrame(() => {
+      if (!this.goban) return;
+      this.goban.resize();
+      requestAnimationFrame(() => this.goban && this.goban.resize());
+    });
+  }
+
   updateStatus() {
+    // 顶部占用随对局状态变化，棋盘尺寸要跟着重算
+    this.syncGameChrome();
+
     if (this.gameStatus === 'playing') {
       if (this.isOnline()) {
         const myTurn = this.isMyOnlineTurn();

@@ -35,36 +35,92 @@ export class Goban {
 
     this.initEvents();
     this.resize();
-    window.addEventListener('resize', () => this.resize());
+    // resize 事件里同步读 clientWidth 有拿到「还没重排完的旧宽度」的风险，
+    // 一律延后一帧再量，量到的才是最终布局。
+    window.addEventListener('resize', () => this.scheduleResize());
+    // 字体 / 图片加载完会改变棋盘上方元素的高度，load 之后再校一次
+    window.addEventListener('load', () => this.scheduleResize());
+    this.watchLayout();
+  }
+
+  /**
+   * 盯住棋盘外层容器的宽度变化。
+   *
+   * 只监听 window.resize 是不够的：浏览器缩放、父容器从单栏切到双栏、
+   * 侧栏异步渲染完成等场景都可能让「棋盘可用宽度」变了却不触发 resize 事件。
+   * 一旦漏掉，棋盘就会永远停在旧尺寸上 —— 表现为「木框撑满了、棋盘缩在中间」。
+   */
+  watchLayout() {
+    if (typeof ResizeObserver === 'undefined') return;
+    const frame = this.canvas.parentElement;
+    const holder = frame && frame.parentElement;
+    if (!holder) return;
+
+    let lastW = Math.round(holder.clientWidth);
+    this._roTarget = holder;
+    this._ro = new ResizeObserver(() => {
+      const w = Math.round(holder.clientWidth);
+      // 只对宽度变化做出反应：棋盘尺寸会反过来改变容器高度，
+      // 若连高度变化也响应，就会和 resize() 形成回馈循环。
+      if (w === lastW) return;
+      lastW = w;
+      this.scheduleResize();
+    });
+    this._ro.observe(holder);
+  }
+
+  /** 同一帧内多次触发只重算一次 */
+  scheduleResize() {
+    if (this._rafPending) return;
+    this._rafPending = true;
+
+    const run = () => {
+      if (!this._rafPending) return;
+      this._rafPending = false;
+      this.resize();
+    };
+
+    // rAF 让重算落在绘制前，视觉上不闪；但无渲染环境 / 后台标签页里 rAF 可能不跑，
+    // 所以再挂一个定时器兜底（先到先得，run() 自带去重）。
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    setTimeout(run, 60);
   }
 
   resize() {
-    const parent = this.canvas.parentElement;
-    if (!parent) return;
+    const frame = this.canvas.parentElement;
+    if (!frame) return;
 
-    // 可用空间由父容器（.goban-frame）决定：扣掉木框内边距
-    const cs = window.getComputedStyle(parent);
+    // 注意：木框自身的宽度会被下面「收紧到刚好包住棋盘」改写，
+    // 所以可用宽度必须从它的外层容器量 —— 否则第二次 resize 会把上一次算出的
+    // 木框宽度当成上限，棋盘就再也长不大了。
+    const holder = frame.parentElement;
+
+    const cs = window.getComputedStyle(frame);
     const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
-    const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-    const availW = Math.max(200, parent.clientWidth - padX);
-    const availH = Math.max(200, parent.clientHeight - padY);
+    const borX = (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0);
+
+    // 可用宽度：外层容器宽度 − 木框内边距与边框
+    const holderW = holder ? holder.clientWidth : frame.clientWidth;
+    const availW = Math.max(200, holderW - padX - borX);
+
+    // 可用高度：视口高度 − 木框上方已占用的高度 − 下方要保留的高度
+    const availH = this.availableHeight(frame);
+    // 木框当前不可见（被遮罩挡住 / display:none）时量不出有意义的高度，先不动
+    if (!availH) return;
 
     // 棋盘必须保持正方形：取可用宽高的较小值
-    let size = Math.min(availW, availH);
+    const size = Math.floor(Math.min(availW, availH));
 
-    // 视口高度兜底，避免棋盘把下方工具栏整个挤出屏幕
-    if (window.innerHeight) {
-      const cap = Math.max(240, window.innerHeight - this.reservedViewportHeight());
-      size = Math.min(size, cap);
-    }
-
-    size = Math.floor(size);
     const dpr = window.devicePixelRatio || 1;
 
     this.canvas.width = size * dpr;
     this.canvas.height = size * dpr;
     this.canvas.style.width = `${size}px`;
     this.canvas.style.height = `${size}px`;
+
+    // 木框收紧到刚好包住棋盘：否则棋盘比木框小时会露出一圈木框底色（#a46a36）
+    frame.style.width = `${size + padX + borX}px`;
+    frame.style.maxWidth = '100%';
 
     this.dpr = dpr;
     this.displaySize = size;
@@ -78,25 +134,45 @@ export class Goban {
   }
 
   /**
-   * 估算棋盘之外必须占用的视口高度（导航、战绩横幅，以及单栏布局时棋盘下方的状态栏与工具栏），
-   * 用于给棋盘尺寸兜底，防止把下方内容挤出屏幕。
+   * 棋盘可用高度 = 视口高度 − 木框顶部已占用的高度 − 底部要保留的高度。
+   *
+   * 顶部直接用木框的实测位置：容器上内边距、导航栏、战绩横幅都是它的前置元素，
+   * 高度与棋盘尺寸无关，所以这个值稳定、不会自我振荡，也比逐个元素估高准确
+   * （能自动带上外边距、换行、字体行高等零碎开销）。
+   *
+   * 底部保留：木框自身的竖向内边距/边框（棋盘在木框里居中，这段必须一起算，
+   * 否则木框下沿会露到屏幕外面），再加上一点呼吸空间；单栏布局时棋盘下方
+   * 还压着状态栏与工具栏，也要留出来。
    */
-  reservedViewportHeight() {
-    const measure = (sel) => {
+  availableHeight(frame) {
+    const vh = window.innerHeight || 0;
+    if (!vh) return 0;
+
+    // 用「相对文档顶部」的位置而不是相对视口，免得页面滚动后棋盘被算成无限大
+    const top = frame.getBoundingClientRect().top + (window.scrollY || 0);
+    if (!(top > 0)) return 0;
+
+    const cs = window.getComputedStyle(frame);
+    const frameY =
+      (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) +
+      (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+
+    const footprint = (sel) => {
       const el = document.querySelector(sel);
       if (!el) return 0;
-      const rect = el.getBoundingClientRect();
-      return rect.height || 0;
+      const s = window.getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden') return 0;
+      const r = el.getBoundingClientRect();
+      return (r.height || 0) + (parseFloat(s.marginTop) || 0) + (parseFloat(s.marginBottom) || 0);
     };
 
-    let h = measure('.navbar') + measure('.stats-banner') + 32;
-
-    // 单栏布局（断点与 CSS 保持一致）时，棋盘下方还压着状态栏与工具栏
+    // 末尾的 16 是底部呼吸，别让木框紧贴屏幕下沿
+    let bottom = 16 + frameY;
     if (window.innerWidth <= 1024) {
-      h += measure('.board-status-bar') + measure('.toolbar') + 32;
+      bottom += footprint('.board-status-bar') + footprint('.toolbar') + 16;
     }
 
-    return h;
+    return Math.max(200, vh - top - bottom);
   }
 
   initEvents() {

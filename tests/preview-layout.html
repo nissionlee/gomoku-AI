@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>布局预览 + 几何测量</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  /* iframe 的尺寸就是「被测视口」——用 ?vw=&vh= 显式指定，
+     不要依赖 --window-size（--headless=new 会扣掉约 150px 浏览器边框，
+     导致量到的视口比标称矮一大截）。 */
+  #fr { position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; border: 0; display: block; }
+  #metrics { position: fixed; left: -99999px; top: 0; }
+</style>
+</head>
+<body>
+<iframe id="fr" src="../index.html"></iframe>
+<pre id="metrics">pending</pre>
+<script>
+// ?ingame=1 → 进入「对局中」状态（gameStatus='playing'），用于对比顶部收窄前后的棋盘尺寸
+// ?vw=1920&vh=1080 → 显式指定被测视口（推荐；不传则用外层窗口实际尺寸）
+const QS = new URLSearchParams(location.search);
+const IN_GAME = QS.get('ingame') === '1';
+const fr = document.getElementById('fr');
+const metricsEl = document.getElementById('metrics');
+
+if (QS.get('vw') && QS.get('vh')) {
+  fr.style.width = QS.get('vw') + 'px';
+  fr.style.height = QS.get('vh') + 'px';
+}
+
+const rect = (el) => {
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+};
+
+function reveal() {
+  let win, doc;
+  try { win = fr.contentWindow; doc = fr.contentDocument; } catch (e) { return; }
+  const app = win.app;
+  if (!app || !app.goban) return;
+
+  ['#authOverlay', '#startOverlay', '#lobbyOverlay', '#adminModal', '#settingsModal', '#winModal']
+    .forEach(sel => { const el = doc.querySelector(sel); if (el) { el.hidden = true; el.style.display = 'none'; } });
+
+  // 摆几颗子，方便看清棋盘边界
+  app.board[6][7] = 1; app.board[6][8] = 2; app.board[7][7] = 1; app.board[5][7] = 2;
+  app.goban.setBoardState(app.board, null, null, []);
+
+  if (IN_GAME) {
+    app.gameStatus = 'playing';
+  } else {
+    app.gameStatus = 'idle';
+  }
+  // 旧版没有 syncGameChrome（基线对比时用），有则调
+  if (typeof app.syncGameChrome === 'function') app.syncGameChrome();
+  // 旧版没有 body.in-game 的 CSS，但为了对比「对局中」状态，仍给它加上类名
+  else doc.body.classList.toggle('in-game', IN_GAME);
+  app.goban.resize();
+
+  // 让 resize 的 rAF 回调先跑完，再量
+  setTimeout(() => {
+    app.goban.resize();
+    const q = (s) => doc.querySelector(s);
+    const canvas = q('#boardCanvas');
+    const frame = q('.goban-frame');
+    const cr = canvas.getBoundingClientRect();
+    const vw = win.innerWidth, vh = win.innerHeight;
+    const cs = (sel, prop) => { const el = q(sel); return el ? win.getComputedStyle(el)[prop] : null; };
+
+    // 诊断：证明加载到的是新版 board.js，并复算两套「可用高度」算法做对比
+    const hasNewAlgo = typeof app.goban.availableHeight === 'function';
+    const holder = q('.board-wrapper');
+    const holderW = holder ? holder.clientWidth : -1;
+    const fcs = win.getComputedStyle(frame);
+    const padX = (parseFloat(fcs.paddingLeft) || 0) + (parseFloat(fcs.paddingRight) || 0);
+    const borX = (parseFloat(fcs.borderLeftWidth) || 0) + (parseFloat(fcs.borderRightWidth) || 0);
+    const availW = Math.round(holderW - padX - borX);
+    const availH = hasNewAlgo ? Math.round(app.goban.availableHeight(frame)) : null;
+    const frameRect = frame.getBoundingClientRect();
+    const frameTopDoc = Math.round(frameRect.top + (win.scrollY || 0));
+
+    metricsEl.textContent = JSON.stringify({
+      模式: IN_GAME ? '对局中 (body.in-game)' : '非对局 (初始态)',
+      viewport: { w: vw, h: vh },
+      inGameClass: doc.body.classList.contains('in-game'),
+      导航栏高: rect(q('.navbar'))?.h,
+      战绩横幅: rect(q('.stats-banner'))?.h ?? 0,
+      横幅可见: cs('.stats-banner', 'display') !== 'none',
+      木框: rect(frame),
+      画布: rect(canvas),
+      画布占视口: {
+        宽: (cr.width / vw * 100).toFixed(1) + '%',
+        高: (cr.height / vh * 100).toFixed(1) + '%',
+        左: Math.round(cr.left), 右: Math.round(vw - cr.right),
+        上: Math.round(cr.top), 下: Math.round(vh - cr.bottom),
+      },
+      页面高: doc.documentElement.scrollHeight,
+      _诊断: {
+        新版算法: hasNewAlgo,
+        boardWrapper宽: holderW,
+        木框padding: padX,
+        木框border: borX,
+        可用宽度availW: availW,
+        可用高度availH: availH,
+        木框顶部文档坐标: frameTopDoc,
+        约束: availH == null ? '?' : (availW < availH ? '宽度卡住' : '高度卡住'),
+      },
+    }, null, 2);
+  }, 350);
+}
+
+fr.addEventListener('load', () => {
+  setTimeout(reveal, 700);
+  setTimeout(reveal, 1800);
+  setTimeout(reveal, 3200);
+  // ?retest=1：复现「布局宽度变了、但没有触发 window.resize」的场景
+  // 老代码只监听 resize 事件，棋盘会永远停在旧尺寸（= 用户截图里木框撑大、棋盘缩在中间）
+  if (QS.get('retest') === '1') setTimeout(layoutChangeTest, 4200);
+});
+
+/**
+ * 回归测试：注入样式把主布局改成单栏 → 棋盘外层容器宽度变化，
+ * 但**不派发任何 resize 事件**。看棋盘会不会自己重算。
+ */
+function layoutChangeTest() {
+  const win = fr.contentWindow, doc = fr.contentDocument;
+  const app = win.app;
+  if (!app || !app.goban) { metricsEl.textContent = 'retest: no app'; return; }
+
+  // 统计 resize() 被调用的次数（观察器若生效，次数会增加）
+  let calls = 0;
+  const orig = app.goban.resize.bind(app.goban);
+  app.goban.resize = function () { calls++; return orig(); };
+
+  const holder = doc.querySelector('.board-wrapper');
+
+  // 对照实验 A：在【iframe 内】观察 .board-wrapper
+  let probeFires = 0;
+  let probeW = holder.clientWidth;
+  if (typeof win.ResizeObserver === 'function') {
+    const probe = new win.ResizeObserver(() => { probeFires++; probeW = holder.clientWidth; });
+    probe.observe(holder);
+  }
+
+  // 对照实验 B：在【外层文档】观察一个临时 div（同样改宽度）
+  let outerFires = 0;
+  const od = document.createElement('div');
+  od.style.cssText = 'position:fixed;left:-9999px;top:0;width:50px;height:50px;';
+  document.body.appendChild(od);
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => { outerFires++; }).observe(od);
+    setTimeout(() => { od.style.width = '300px'; }, 120);
+  }
+
+  const before = {
+    wrapper宽: Math.round(holder.clientWidth),
+    画布: Math.round(app.goban.canvas.getBoundingClientRect().width),
+    木框: Math.round(doc.querySelector('.goban-frame').getBoundingClientRect().width),
+  };
+
+  const st = doc.createElement('style');
+  st.id = 'retest-style';
+  st.textContent = '.main-layout{grid-template-columns:1fr !important;}';
+  doc.head.appendChild(st);
+
+  // 等两帧 + 一段真实时间，让 ResizeObserver / rAF 有机会跑
+  setTimeout(() => {
+    const after = {
+      wrapper宽: Math.round(holder.clientWidth),
+      画布: Math.round(app.goban.canvas.getBoundingClientRect().width),
+      木框: Math.round(doc.querySelector('.goban-frame').getBoundingClientRect().width),
+    };
+    const autoCalls = calls;
+    // 再手动调一次：若这次能变大，说明算法没问题、只是「触发」没到位
+    app.goban.resize();
+    const manual = Math.round(app.goban.canvas.getBoundingClientRect().width);
+    const healed = after.画布 !== before.画布;
+    metricsEl.textContent = JSON.stringify({
+      测试: '布局变宽但不触发 resize 事件',
+      变化前: before,
+      变化后: after,
+      自动resize次数: autoCalls,
+      手动resize后画布: manual,
+      观察器已挂载: !!app.goban._ro,
+      被观察元素: app.goban._roTarget ? (app.goban._roTarget.className || app.goban._roTarget.tagName) : null,
+      对照观察器触发: probeFires,
+      对照观察器最后宽度: probeW,
+      外层对照观察器触发: outerFires,
+      棋盘是否自愈: healed,
+      结论: healed ? '✅ 新版会自己重算'
+        : (manual !== after.画布 ? '⚠️ 算法正确但未自动触发' : '❌ 棋盘卡在旧尺寸'),
+    }, null, 2);
+  }, 900);
+}
+</script>
+</body>
+</html>

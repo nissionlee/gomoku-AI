@@ -204,6 +204,39 @@ body {
   border: 1px solid rgba(250, 84, 28, 0.25);
 }
 
+/* ================= 2b. 对局中：收窄顶部，把纵向空间让给棋盘 =================
+   棋盘是正方形，尺寸上限 = min(容器宽度, 视口高度 − 顶部占用)，
+   在 16:9 桌面上几乎总是被「视口高度」卡住。对局时把导航栏压薄、收起战绩横幅，
+   就能把省下的高度全部换成棋盘尺寸（1920×1080 下约 +11%）。
+   由 js/app.js 的 syncGameChrome() 根据 gameStatus 切换 body.in-game。 */
+body.in-game .app-container {
+  padding-top: 8px;
+}
+
+body.in-game .navbar {
+  gap: 8px;
+  padding-bottom: 6px;
+}
+
+body.in-game .nav-brand .logo-icon {
+  font-size: 1.3rem;
+}
+
+body.in-game .nav-brand h1 {
+  font-size: 1.12rem;
+  letter-spacing: 0.5px;
+}
+
+body.in-game .nav-quick-controls .btn-icon {
+  padding: 3px 9px;
+  font-size: 0.8rem;
+}
+
+/* 战绩横幅在对局中收起（棋盘下方/右栏的状态卡仍然显示实时信息） */
+body.in-game .stats-banner {
+  display: none;
+}
+
 /* ================= 3. 核心布局 ================= */
 /* 宽屏：左侧几乎全部让给棋盘，右侧是控制面板 */
 .main-layout {
@@ -220,11 +253,13 @@ body {
   width: 100%;
 }
 
-/* 棋盘木框：尽量撑满左栏，同时受视口高度约束（免得把下方内容挤出屏幕） */
+/* 棋盘木框：尺寸由 js/board.js 精确计算（可用宽度 vs 视口高度预算），
+   这里只给一个宽松上限兜底。木框宽度会被 JS 收紧到刚好包住棋盘，
+   避免出现「木框比棋盘大一圈、露出底色」的情况。 */
 .goban-frame {
   position: relative;
   width: 100%;
-  max-width: min(100%, calc(100vh - 150px));
+  max-width: 100%;
   aspect-ratio: 1 / 1;
   background: #a46a36;
   padding: 8px;
@@ -1668,7 +1703,8 @@ body {
   }
 
   .goban-frame {
-    max-width: min(100%, calc(100vh - 300px));
+    /* 尺寸交给 js/board.js 按「容器宽度 vs 视口高度预算」精确计算 */
+    max-width: 100%;
   }
 
   .toolbar {
@@ -1707,7 +1743,8 @@ body {
   }
 
   .goban-frame {
-    max-width: min(100%, calc(100vh - 330px));
+    /* 尺寸交给 js/board.js 计算 */
+    max-width: 100%;
     padding: 5px;
     border-width: 2px;
     border-radius: var(--radius-md);
