@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>悔棋回归测试</title>
+<!--
+  悔棋 / 落子一致性回归测试（无头浏览器运行）
+
+  用法：
+    1) 在项目根目录起一个静态服务（ES Module 需要 http:// 协议）：
+         python -m http.server 18080 --bind 127.0.0.1
+    2) 把本文件复制到根目录（或直接从 /tests/ 访问），用无头 Chrome 跑：
+         chrome --headless=new --disable-gpu --no-proxy-server \
+                --virtual-time-budget=30000 --dump-dom \
+                "http://127.0.0.1:18080/tests/undo-regression.html"
+    3) 从输出里取 <pre id="out"> 的内容，末尾会打印 PASS/FAIL 汇总。
+
+  覆盖用例：
+    T1 玩家执白、AI 思考中点悔棋 → 必须撤掉玩家自己最后一手（不能撤成 AI 那手）
+    T2 悔棋后过期的 AI 响应不得落地（核心回归：曾导致黑白子数越悔越失衡）
+    T3 executeMove 不得覆盖已有棋子（曾导致棋子被「吃掉」）
+    T4 反复悔棋 + 落子后，盘上子数恒等于手数、黑白差 ≤ 1
+    T5 玩家执黑时悔棋撤掉自己最后一手
+    T6 历史含重复落点（旧版脏数据）时悔棋能自愈
+-->
+<style>
+  body { font-family: Consolas, monospace; background: #111; color: #eee; padding: 12px; }
+  pre { font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+  .pass { color: #4ade80; } .fail { color: #f87171; } .na { color: #fbbf24; }
+  iframe { width: 1200px; height: 800px; border: 1px solid #333; }
+</style>
+</head>
+<body>
+<pre id="out">running…</pre>
+<iframe id="fr" src="./index.html"></iframe>
+<script>
+const out = document.getElementById('out');
+const lines = [];
+function log(s) { lines.push(s); out.textContent = lines.join('\n'); }
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function waitForApp(win, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    (function poll() {
+      if (win.app && win.app.goban && win.app.board) return resolve(win.app);
+      if (Date.now() - t0 > timeout) return reject(new Error('app 未就绪'));
+      setTimeout(poll, 100);
+    })();
+  });
+}
+
+// 局面快照
+function snap(app) {
+  let stones = 0, blk = 0, wht = 0;
+  for (let r = 0; r < 15; r++) for (let c = 0; c < 15; c++) {
+    const v = app.board[r][c];
+    if (v === 1 || v === 2) stones++;
+    if (v === 1) blk++;
+    if (v === 2) wht++;
+  }
+  return { stones, blk, wht, n: app.moveHistory.length, turn: app.turn,
+           nots: app.moveHistory.map(m => m.notation).join(',') };
+}
+
+function resetApp(app, playerColor) {
+  try { app.stopTimer && app.stopTimer(); } catch (e) {}
+  try { app.stopPolling && app.stopPolling(); } catch (e) {}
+  app.board = Array.from({ length: 15 }, () => Array(15).fill(0));
+  app.moveHistory = [];
+  app.gameStatus = 'playing';
+  app.winner = null;
+  app.winningLine = null;
+  app.replay = app.replay || {};
+  app.replay.active = false;
+  app.replay.external = false;
+  app.playerColor = playerColor;
+  app.aiColor = playerColor === 1 ? 2 : 1;
+  app.turn = 1;                       // 黑先
+  app.moveGen = (app.moveGen || 0) + 1000;
+  app.settings.aiEngine = 'local';
+  app.settings.difficulty = 'easy';
+  try { app.goban.setLocked(false); } catch (e) {}
+}
+
+// 记号 → 内部坐标：row N => r = 15-N，列 A => c = 0
+const NOT = (s) => ({ r: 15 - parseInt(s.slice(1), 10), c: s.charCodeAt(0) - 65 });
+
+function play(app, list) {
+  // list: [['H8',1],['H9',2],...]
+  for (const [not, color] of list) {
+    const { r, c } = NOT(not);
+    app.executeMove(r, c, color);
+  }
+}
+
+let pass = 0, fail = 0;
+function check(name, cond, detail) {
+  if (cond) { pass++; log(`  [PASS] ${name}`); }
+  else { fail++; log(`  [FAIL] ${name}  → ${detail || ''}`); }
+}
+function info(name, detail) { log(`  [INFO] ${name}  ${detail}`); }
+
+(async function main() {
+  const fr = document.getElementById('fr');
+  let app;
+  try {
+    app = await waitForApp(fr.contentWindow);
+  } catch (e) {
+    log('无法初始化应用：' + e.message);
+    log('RESULT ' + JSON.stringify({ pass: 0, fail: 1 }));
+    return;
+  }
+  log('应用已就绪。开始测试。\n');
+
+  // ---------- T1 悔棋语义：AI 思考期间点悔棋，必须撤掉玩家自己那一手 ----------
+  log('T1  玩家执白 · AI 思考中点悔棋 → 撤掉玩家自己最后一手');
+  resetApp(app, 2);
+  play(app, [['H8', 1], ['H9', 2], ['I9', 1], ['G8', 2], ['H10', 1]]);
+  app.turn = 1;                        // 模拟 AI 正在思考
+  info('悔棋前', JSON.stringify(snap(app)));
+  app.handleUndo();
+  const s1 = snap(app);
+  info('悔棋后', JSON.stringify(s1));
+  check('玩家自己最后一手 G8 已从历史移除', !s1.nots.split(',').includes('G8'), s1.nots);
+  check('历史长度 = 3', s1.n === 3, 'n=' + s1.n);
+  check('盘上 3 子（黑 2 / 白 1）', s1.stones === 3 && s1.blk === 2 && s1.wht === 1, JSON.stringify(s1));
+  check('轮到玩家（白）落子', s1.turn === 2, 'turn=' + s1.turn);
+
+  // ---------- T2 核心回归：悔棋后，过期的 AI 响应不得落地 ----------
+  log('\nT2  悔棋后 · 过期 AI 响应不得落子（核心回归）');
+  resetApp(app, 2);
+  play(app, [['H8', 1], ['H9', 2], ['I9', 1], ['G8', 2]]);
+  app.turn = 1;
+  const before = snap(app);
+  info('悔棋前', JSON.stringify(before));
+  const pending = app.triggerAIMove();       // AI 开始思考（不 await）
+  await sleep(60);
+  app.handleUndo();                          // 思考期间悔棋
+  const afterUndo = snap(app);
+  info('悔棋后（AI 仍在飞）', JSON.stringify(afterUndo));
+  try { await pending; } catch (e) { info('AI 请求异常', e.message); }
+  await sleep(120);
+  const afterAI = snap(app);
+  info('AI 响应回来后', JSON.stringify(afterAI));
+  check('AI 响应未增加任何棋子', afterAI.stones === afterUndo.stones, `${afterUndo.stones} → ${afterAI.stones}`);
+  check('AI 响应未增加任何手数', afterAI.n === afterUndo.n, `${afterUndo.n} → ${afterAI.n}`);
+  check('仍是玩家（白）回合', afterAI.turn === 2, 'turn=' + afterAI.turn);
+
+  // ---------- T3 executeMove 不得覆盖已有棋子 ----------
+  log('\nT3  executeMove 不得覆盖已有棋子');
+  resetApp(app, 2);
+  play(app, [['H8', 1]]);
+  let ret;
+  try { ret = app.executeMove(7, 7, 2); } catch (e) { ret = 'throw:' + e.message; }
+  const s3 = snap(app);
+  check('重复落子被拒绝（返回 false）', ret === false, 'return=' + JSON.stringify(ret));
+  check('H8 仍是黑子', app.board[7][7] === 1, 'v=' + app.board[7][7]);
+  check('手数仍为 1', s3.n === 1, 'n=' + s3.n);
+
+  // ---------- T4 反复悔棋 / 落子后，棋盘与手数保持一致 ----------
+  log('\nT4  反复悔棋 + 落子后的一致性');
+  resetApp(app, 2);
+  play(app, [['H8', 1], ['H9', 2], ['I9', 1], ['G8', 2], ['H10', 1], ['I10', 2]]);
+  for (let i = 0; i < 3; i++) {
+    app.turn = 1;
+    app.handleUndo();
+    const s = snap(app);
+    const ok = (typeof app.assertBoardConsistency === 'function')
+      ? app.assertBoardConsistency('T4#' + i)
+      : (s.stones === s.n);
+    check(`第 ${i + 1} 次悔棋后：盘上子数 = 手数`, ok && s.stones === s.n, JSON.stringify(s));
+    check(`第 ${i + 1} 次悔棋后：黑白差 ≤ 1`, Math.abs(s.blk - s.wht) <= 1, JSON.stringify(s));
+    const { r, c } = NOT('F' + (10 - i));
+    app.executeMove(r, c, 2);
+    app.turn = 1;
+  }
+  const s4 = snap(app);
+  const ok4 = (typeof app.assertBoardConsistency === 'function') ? app.assertBoardConsistency('T4-final') : true;
+  check('最终一致性自检通过', ok4 && s4.stones === s4.n, JSON.stringify(s4));
+
+  // ---------- T5 玩家执黑时的悔棋 ----------
+  log('\nT5  玩家执黑 · 悔棋撤掉自己最后一手');
+  resetApp(app, 1);
+  play(app, [['H8', 1], ['H9', 2], ['I9', 1], ['G8', 2]]);
+  app.turn = 1;
+  app.handleUndo();
+  const s5 = snap(app);
+  info('悔棋后', JSON.stringify(s5));
+  check('玩家自己最后一手 I9 已移除', !s5.nots.split(',').includes('I9'), s5.nots);
+  check('历史长度 = 2', s5.n === 2, 'n=' + s5.n);
+  check('盘上 2 子（黑 1 / 白 1）', s5.stones === 2 && s5.blk === 1 && s5.wht === 1, JSON.stringify(s5));
+  check('轮到玩家（黑）落子', s5.turn === 1, 'turn=' + s5.turn);
+
+  // ---------- T6 脏数据：历史里有重复落点时，悔棋后必须自愈 ----------
+  log('\nT6  历史含重复落点（旧版脏数据）时悔棋能自愈');
+  resetApp(app, 2);
+  play(app, [['H8', 1], ['H9', 2], ['I9', 1], ['G8', 2]]);
+  app.moveHistory.push({ r: 7, c: 7, color: 1, notation: 'H8', comment: '', t: Date.now() });
+  app.board[7][7] = 1;                       // 制造「同点两条记录」
+  app.turn = 1;
+  info('悔棋前', JSON.stringify(snap(app)));
+  app.handleUndo();
+  const s6 = snap(app);
+  info('悔棋后', JSON.stringify(s6));
+  check('盘上子数 = 手数（重复记录已清理）', s6.stones === s6.n, JSON.stringify(s6));
+
+  log(`\n================ 汇总 ================`);
+  log(`PASS ${pass}   FAIL ${fail}`);
+  log('RESULT ' + JSON.stringify({ pass, fail }));
+})();
+</script>
+</body>
+</html>

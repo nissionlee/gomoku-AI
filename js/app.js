@@ -52,6 +52,10 @@ class GomokuApp {
     this.currentUser = null;   // 登录用户
     this.lastMoveCount = 0;    // 已渲染到第几手（增量拉取用）
 
+    // 局面代际：悔棋 / 重开 / 切局时 +1，用来作废所有「进行中」的 AI 请求。
+    // 没有它的话，悔棋后 AI 的旧响应会照样落子，甚至覆盖掉已有的棋子。
+    this.moveGen = 0;
+
     // 配置与战绩
     this.settings = StorageManager.getSettings();
     sound.setMuted(!this.settings.soundEnabled);
@@ -608,6 +612,7 @@ class GomokuApp {
   enterAIMode() {
     this.onlineGame = null;
     this.stopPolling();
+    this.moveGen++; // 作废可能残留的 AI 请求
     this.hideLobby();
     if (this.startOverlay) this.startOverlay.hidden = false;
     if (this.goban) this.goban.setLocked(true);
@@ -1047,6 +1052,7 @@ class GomokuApp {
     }
 
     // 复位棋盘与计时，清掉上一局残留
+    this.moveGen++; // 作废进行中的 AI 请求
     this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
     this.moveHistory = [];
     this.winner = null;
@@ -1112,6 +1118,8 @@ class GomokuApp {
    */
   startNewGame() {
     this.hideStartOverlay();
+
+    this.moveGen++; // 作废上一局残留的 AI 请求
 
     this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
     this.moveHistory = [];
@@ -1225,6 +1233,13 @@ class GomokuApp {
    * 执行落子
    */
   executeMove(r, c, color, comment = '') {
+    // 最后一道防线：绝不覆盖已有棋子。
+    // 早先这里直接赋值，AI 的过期落子会把对手的棋子「吃掉」，导致盘面黑白数量失衡。
+    if (!this.board[r] || this.board[r][c] !== EMPTY) {
+      console.warn('executeMove: 目标位置已有棋子或越界，已忽略', r, c);
+      return false;
+    }
+
     this.board[r][c] = color;
     const notation = coordToNotation(r, c);
     this.moveHistory.push({ r, c, color, notation, comment, t: Date.now() });
@@ -1253,6 +1268,9 @@ class GomokuApp {
    * AI 思考并落子
    */
   async triggerAIMove(isFirstMove = false) {
+    // 记下当前局面代际：悔棋 / 重开会让它自增，届时本次思考的结果一律作废
+    const gen = this.moveGen;
+
     this.goban.setLocked(true);
     this.statusTextEl.textContent = 'AI 正在精密计算中...';
     this.statusTextEl.classList.add('ai-thinking');
@@ -1276,7 +1294,8 @@ class GomokuApp {
           candidates,
           {
             onProgress: (progress) => {
-              // 本局已结束或已切局 → 返回 false 通知上游中止流
+              // 玩家已悔棋 / 已切局 → 返回 false 通知上游中止流，别再往下算了
+              if (gen !== this.moveGen) return false;
               if (this.gameStatus !== 'playing') return false;
               this.renderLLMProgress(progress);
               return true;
@@ -1321,15 +1340,31 @@ class GomokuApp {
         aiComment = this.generateAlgorithmComment(chosenMove.score);
       }
 
+      // 落子前的三道校验：局面没被改过、确实轮到 AI、落点仍然空着。
+      // 任一不满足就安静放弃这一手 —— 悔棋后玩家会自己继续下，AI 不该再插一脚。
+      if (gen !== this.moveGen) return;
       if (this.gameStatus !== 'playing') return;
+      if (this.turn !== this.aiColor) return;
+      if (!this.board[chosenMove.r] || this.board[chosenMove.r][chosenMove.c] !== EMPTY) {
+        console.warn('AI 落点已被占用，放弃这一手', chosenMove);
+        this.turn = this.playerColor;
+        this.goban.setLocked(false);
+        this.updateStatus();
+        return;
+      }
 
       // 更新 AI 气泡对话
       if (aiComment) {
         this.aiSpeechTextEl.textContent = aiComment;
       }
 
-      // 执行 AI 落子
-      this.executeMove(chosenMove.r, chosenMove.c, this.aiColor, aiComment);
+      // 执行 AI 落子（executeMove 内部还有一道「不覆盖已有棋子」的防线）
+      if (this.executeMove(chosenMove.r, chosenMove.c, this.aiColor, aiComment) === false) {
+        this.turn = this.playerColor;
+        this.goban.setLocked(false);
+        this.updateStatus();
+        return;
+      }
 
       // 检查胜负
       if (this.checkGameEnd(chosenMove.r, chosenMove.c, this.aiColor)) {
@@ -1552,6 +1587,76 @@ class GomokuApp {
   }
 
   /**
+   * 用 moveHistory 重建棋盘。
+   * 棋盘状态只由历史唯一决定 —— 这样「悔棋 / 回放 / 读档」都不可能再和手数失步。
+   * 历史里的 color 可能是数字（新数据）或 'black'/'white' 字符串（老数据），这里统一归一化。
+   */
+  rebuildBoardFromHistory() {
+    const next = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
+    for (const m of this.moveHistory) {
+      if (!m || !Number.isInteger(m.r) || !Number.isInteger(m.c)) continue;
+      if (m.r < 0 || m.r >= BOARD_SIZE || m.c < 0 || m.c >= BOARD_SIZE) continue;
+      let v = m.color;
+      if (v === 'black') v = BLACK;
+      else if (v === 'white') v = WHITE;
+      if (v === BLACK || v === WHITE) next[m.r][m.c] = v;
+    }
+    this.board = next;
+    return next;
+  }
+
+  /**
+   * 清理 moveHistory 中「同一落点出现多次」的脏数据。
+   * 旧版本 executeMove 不判空位，AI 的过期落子会覆盖对手棋子，历史里就留下同点两条记录，
+   * 于是「盘上子数」少于「手数」。保留每个落点的最后一次（与棋盘最终状态一致）。
+   * @returns {number} 被移除的条数
+   */
+  sanitizeMoveHistory() {
+    const lastAt = new Map();
+    this.moveHistory.forEach((m, i) => lastAt.set(`${m.r},${m.c}`, i));
+    const before = this.moveHistory.length;
+    this.moveHistory = this.moveHistory.filter((m, i) => lastAt.get(`${m.r},${m.c}`) === i);
+    return before - this.moveHistory.length;
+  }
+
+  /** 统计某一方在盘上的子数 */
+  countColor(color) {
+    let n = 0;
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        if (this.board[r][c] === color) n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * 自检：盘上子数必须等于手数，且黑白数量满足先后手奇偶（黑 == 白 或 黑 == 白 + 1）。
+   * 不满足说明还有别的路径在偷偷改棋盘 —— 直接报错，别让它静默烂下去。
+   * @returns {boolean} 是否一致
+   */
+  assertBoardConsistency(tag = '') {
+    let stones = 0;
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        if (this.board[r][c] !== EMPTY) stones++;
+      }
+    }
+    const blk = this.countColor(BLACK);
+    const wht = this.countColor(WHITE);
+    const okCount = stones === this.moveHistory.length;
+    const okParity = blk === wht || blk === wht + 1;
+    if (!okCount || !okParity) {
+      console.error(
+        `[棋盘自检失败${tag ? ' @' + tag : ''}] 盘上 ${stones} 子（黑 ${blk} / 白 ${wht}），` +
+        `手数 ${this.moveHistory.length}；子数${okCount ? '一致' : '不一致'}，奇偶${okParity ? '正常' : '异常'}`
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * 悔棋处理
    */
   handleUndo() {
@@ -1577,26 +1682,45 @@ class GomokuApp {
       return;
     }
 
-    // 悔棋语义：撤销「双方最近一轮」，把回合还给当前该下的一方重新落子。
-    // - 双人同屏：撤 2 手（对手 1 手 + 自己 1 手）。若只撤 1 手，回合会落到对手身上，
-    //   当前玩家就从先手变成后手，等于没悔成自己那一步。
-    // - 人机模式：轮到玩家时撤 2 手（AI 1 手 + 玩家 1 手）；若轮到 AI 则撤 1 手。
-    const stepsToUndo = (this.isPvP() || this.turn === this.playerColor) ? 2 : 1;
+    // 先清掉历史里可能残留的重复落点（旧版本允许覆盖时留下的脏数据）
+    const dropped = this.sanitizeMoveHistory();
+    if (dropped > 0) {
+      console.warn(`悔棋前清理了 ${dropped} 条重复落点记录（旧版本遗留脏数据）`);
+      this.rebuildBoardFromHistory();
+      this.stepCountEl.textContent = this.moveHistory.length;
+    }
 
-    for (let i = 0; i < stepsToUndo; i++) {
-      if (this.moveHistory.length === 0) break;
-      const last = this.moveHistory.pop();
-      this.board[last.r][last.c] = EMPTY;
-      if (this.isPvP()) {
-        this.turn = last.color; // 双人模式下，把回合准确还给刚撤销的这方
+    // 悔棋语义：撤到「玩家自己最后一手之前」—— 那个时刻天然轮到玩家落子，
+    // 黑白手数也天然满足先后手奇偶（黑先白后，黑 ∈ {白, 白 + 1}）。
+    // 旧实现按「当前轮到谁」决定撤 1 手还是 2 手：玩家在 AI 思考期间点悔棋时
+    // 只撤掉自己那一手，AI 多出来的那手留在了盘上，黑白差每悔一次就滚大 1 手
+    // —— 这正是「我只有 3 枚棋、黑棋 6 个」的成因。
+    let cut = -1;
+    const normColor = (v) => (v === 'black' ? BLACK : (v === 'white' ? WHITE : v));
+    for (let i = this.moveHistory.length - 1; i >= 0; i--) {
+      if (normColor(this.moveHistory[i].color) === this.playerColor) {
+        cut = i;
+        break;
       }
     }
 
+    if (cut < 0) {
+      this.showToast('还没有你的落子，无法悔棋');
+      return;
+    }
+
+    // 局面已经变了，作废所有进行中的 AI 请求：之前那一步的思考结果不能再落地
+    this.moveGen++;
+
+    const undone = this.moveHistory.length - cut;
+    this.moveHistory.length = cut;
+
+    // 棋盘交给历史重建，杜绝增量回退漏改 / 多改
+    this.rebuildBoardFromHistory();
+
     sound.playUndo();
 
-    if (!this.isPvP()) {
-      this.turn = this.playerColor;
-    }
+    this.turn = this.playerColor;
 
     const previousMove = this.moveHistory[this.moveHistory.length - 1] || null;
 
@@ -1613,9 +1737,19 @@ class GomokuApp {
     this.renderMoveList();
     this.updateReplayUI();
     this.updateStatus();
-    this.showToast(this.isPvP()
-      ? `已撤销双方最近一轮，轮到【${this.turn === BLACK ? '黑方' : '白方'}】重新落子`
-      : '悔棋成功，请重新落子');
+
+    this.assertBoardConsistency('悔棋');
+
+    const blk = this.countColor(BLACK);
+    const wht = this.countColor(WHITE);
+    this.showToast(
+      `已撤回 ${undone} 手，轮到【${this.playerColor === BLACK ? '黑方' : '白方'}】重新落子` +
+      `（盘面 黑 ${blk} · 白 ${wht}）`
+    );
+
+    if (dropped > 0) {
+      console.warn(`悔棋时清理了 ${dropped} 条重复落点记录（旧版本遗留脏数据）`);
+    }
   }
 
   /**
