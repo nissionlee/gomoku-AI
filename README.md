@@ -1,13 +1,20 @@
-# 弈境五子棋 · AI 对弈平台 (Gomoku Web)
+# 弈境五子棋 · 多用户联机与 AI 对弈 (Gomoku Web)
 
-精美典雅的东方现代风格五子棋网页版，支持与本地多等级智能算法或云端大语言模型（DeepSeek、Gemini、OpenAI、通义千问等）实时对弈。
+精美典雅的东方现代风格五子棋网页版：支持多账号登录、跨设备实时联机对战，也能与本地多等级智能算法或云端大语言模型（DeepSeek、Gemini、OpenAI、通义千问等）对弈。
 
 ---
 
 ## ✨ 核心特性
 
-1. **🚀 100% 免费部署于 Cloudflare**
-   - 纯前端零后端依赖架构，原生适配 **Cloudflare Pages**（无限流量、全球 CDN 加速、自带免费 HTTPS）。
+1. **👥 多账号登录 · 实时联机对战**
+   - **用户名 + 密码登录**：每位棋友一个账号，设置、战绩、棋谱各自独立互不干扰。密码用 PBKDF2-SHA256 加盐哈希存储，会话走 HttpOnly Cookie。
+   - **房间制联机**：创建房间时选先手（执黑 / 执白 / 随机），把 6 位房间码发给对手即可开战；也可在「大厅」直接加入等待中的房间，或查看在线棋友。
+   - **实时同步**：对手落子约 2 秒内同步到你的棋盘（自适应轮询，自己回合暂停拉取以省流量）；自己落子采用乐观更新，手感无延迟。
+   - **服务端裁决**：轮次、空位、黑棋三三/四四/长连禁手、五连判胜全部由服务端校验，改前端也绕不过去。
+   - **管理员账号**：首个注册的账号即管理员，可在「👥 用户管理」中新建/删除用户、重置密码、调整角色（系统始终保留至少一个管理员）。
+2. **🚀 100% 免费部署于 Cloudflare**
+   - 原生适配 **Cloudflare Pages**（无限流量、全球 CDN 加速、自带免费 HTTPS）。
+   - 用户 / 会话 / 对局数据存 **Cloudflare D1**（SQLite），跨设备配置同步存 **KV**，均在免费额度内（D1 每日 10 万次读写）。
    - 随附 `functions/api/proxy.js` 无服务器反向代理，解决部分国内大模型 API 跨域问题。
 2. **🤖 多大模型自定义配置**
    - 支持主流大模型服务商预设：**DeepSeek**、**Google Gemini**、**OpenAI**、**阿里通义千问 (DashScope)**、**月之暗面 (Kimi)** 以及 **本地 Ollama / OneAPI / 自定义兼容端点**。
@@ -108,12 +115,27 @@ npx wrangler kv namespace create SETTINGS_KV
 # 把输出的 id 填进 wrangler.toml 的 [[kv_namespaces]]
 ```
 
-本地联调（无需部署即可测试同步接口与页面）：
+### ⚠️ 关于「用户 / 会话 / 对局」的 D1 绑定
+多账号登录与联机对战依赖一个 **D1（SQLite）** 数据库（见 `functions/_lib/` 与 `functions/api/`）。部署方式不同，绑定方式也不同：
+
+- **用 Wrangler 部署（方法二）**：会自动读取 `wrangler.toml` 中的 `[[d1_databases]]`，无需额外操作。
+- **后台直接上传（方法三）或连接 Git 部署**：不会读取 `wrangler.toml`，需在 **项目 → Settings → Functions → D1 database bindings** 手动添加一条，**Variable name 必须填 `DB`**，否则接口会返回「服务端未绑定 D1 数据库 DB」。
+
+首次使用需要建表（只需一次）：
 ```bash
-npx wrangler pages dev . --port 8799 --kv SETTINGS_KV
+npx wrangler d1 create gomoku-ai-db     # 把输出的 database_id 填进 wrangler.toml
+npx wrangler d1 execute gomoku-ai-db --remote --file=db/schema.sql
+```
+
+> 首次打开页面若提示「首次使用 · 创建管理员」，说明库里还没有账号，按提示创建第一个账号即可 —— 该账号自动获得管理员权限。
+
+本地联调（无需部署即可测试登录、联机与同步接口）：
+```bash
+npx wrangler d1 execute gomoku-ai-db --local --file=db/schema.sql   # 建本地表（首次）
+npx wrangler pages dev . --port 8799
 # 浏览器访问 http://127.0.0.1:8799
 ```
-> 提示：纯 `python -m http.server` 只能跑静态页面，不含 Functions，因此同步接口会返回 404；其余功能（含本地算法分析）不受影响。
+> 提示：纯 `python -m http.server` 只能跑静态页面，不含 Functions，因此登录与同步接口都会返回 404；其余功能（含本地算法分析）不受影响。
 
 > 另注：Cloudflare 的 Bot 防护可能按客户端指纹拦截非浏览器请求（返回 `error code: 1010`），用脚本自测接口时记得带上浏览器 User-Agent，真实浏览器访问不受影响。
 
@@ -156,6 +178,21 @@ npx wrangler pages dev . --port 8799 --kv SETTINGS_KV
 ---
 
 ## 🆕 更新记录
+
+### v1.2.0
+
+**多账号 + 实时联机对战（架构升级）**
+- 新增用户体系：用户名 + 密码登录（PBKDF2-SHA256 加盐哈希），会话走 HttpOnly Cookie，用户/会话存 D1。
+- 新增「对局大厅」：创建房间（选先手）、房间码加入、我的对局列表、等待中的房间、在线玩家。
+- 新增实时联机对战：约 2 秒自适应轮询同步，自己落子乐观更新；**轮次、空位、黑棋禁手、五连判胜全部服务端校验**，支持认输与中途退出后重新进入。
+- 新增管理员面板：新建/删除用户、重置密码、调整角色（系统至少保留一个管理员）。
+- **移除「双人同屏」模式**（同一浏览器轮流落子），改为跨账号联机对战；旧配置里的 `pvp` 会自动归一到本地人机。
+- 后端新增 `functions/_lib/`（认证工具、禁手规则镜像、对局数据层）与 `functions/api/auth|users|games|game` 系列接口。
+
+**界面布局优化**
+- PC 端：棋盘尺寸上限从 680px 放开为自适应（实测约 871px，+28%），状态栏与工具栏移入右侧栏，左侧绝大部分留给棋盘。
+- 窄屏 / 电子书：新增独立断点，压缩留白与上方横幅，工具栏改 4 列 2 行，棋盘占屏宽提升至约 96%。
+- 新增开局面板：开局前显式选择执黑 / 执白，点「开始对局」才正式落子。
 
 ### v1.1.3
 

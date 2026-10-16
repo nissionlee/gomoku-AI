@@ -31,6 +31,7 @@ import {
 import { sound } from './audio.js';
 import { StorageManager } from './storage.js';
 import { Goban } from './board.js';
+import { api } from './api.js';
 
 class GomokuApp {
   constructor() {
@@ -43,6 +44,13 @@ class GomokuApp {
     this.startTime = null;
     this.timerInterval = null;
     this.elapsedSeconds = 0;
+
+    // 联机对战状态
+    this.onlineGame = null;    // 当前联机对局对象；null 表示不在联机模式
+    this.pollTimer = null;     // 轮询定时器
+    this.pollBusy = false;     // 防重入
+    this.currentUser = null;   // 登录用户
+    this.lastMoveCount = 0;    // 已渲染到第几手（增量拉取用）
 
     // 配置与战绩
     this.settings = StorageManager.getSettings();
@@ -102,7 +110,7 @@ class GomokuApp {
     } catch (err) {
       console.warn('自动同步设置失败：', err);
     }
-    this.startNewGame();
+    this.requestNewGame();
     if (this.pendingSyncToast) {
       this.showToast(this.pendingSyncToast);
       this.pendingSyncToast = '';
@@ -170,6 +178,15 @@ class GomokuApp {
     this.difficultySelect = document.getElementById('difficultySelect');
     this.engineSelect = document.getElementById('engineSelect');
 
+    // 开局面板（先手选择 + 正式开始）
+    this.startOverlay = document.getElementById('startOverlay');
+    this.startColorGroup = document.getElementById('startColorGroup');
+    this.btnStartGame = document.getElementById('btnStartGame');
+    this.startColorBtns = this.startColorGroup
+      ? Array.from(this.startColorGroup.querySelectorAll('.start-color-btn'))
+      : [];
+    this.selectedColor = BLACK;
+
     // 弹窗
     this.settingsModal = document.getElementById('settingsModal');
     this.historyModal = document.getElementById('historyModal');
@@ -177,7 +194,7 @@ class GomokuApp {
     this.winModal = document.getElementById('winModal');
     this.toastEl = document.getElementById('toast');
 
-    // 锁屏认证元素 (专属密码: 362514)
+    // 登录与认证元素
     this.authOverlay = document.getElementById('authOverlay');
     this.authCard = document.getElementById('authCard');
     this.authPinInput = document.getElementById('authPinInput');
@@ -191,8 +208,11 @@ class GomokuApp {
     // 密码认证体系
     this.initAuth();
 
+    // 开局面板：先手选择与正式开始
+    this.bindStartOverlayEvents();
+
     // 基础控制
-    this.btnNewGame.addEventListener('click', () => this.startNewGame());
+    this.btnNewGame.addEventListener('click', () => this.requestNewGame());
     this.btnUndo.addEventListener('click', () => this.handleUndo());
     this.btnResign.addEventListener('click', () => this.handleResign());
     this.btnHint.addEventListener('click', () => this.handleHint());
@@ -212,7 +232,7 @@ class GomokuApp {
         ? '双人同屏对弈 (人人模式)'
         : (e.target.value === 'llm' ? '大模型对弈模式' : '本地算法模式');
       this.showToast(`已切换为：${label}`);
-      this.startNewGame();
+      this.requestNewGame();
     });
 
     // 静音切换
@@ -259,7 +279,7 @@ class GomokuApp {
     // 赢局弹窗按钮
     document.getElementById('btnWinModalNewGame')?.addEventListener('click', () => {
       this.winModal.classList.remove('active');
-      this.startNewGame();
+      this.requestNewGame();
     });
     document.getElementById('btnWinModalViewHistory')?.addEventListener('click', () => {
       this.winModal.classList.remove('active');
@@ -268,83 +288,798 @@ class GomokuApp {
   }
 
   /**
-   * 密码认证体系 (专属密码: 362514)
+   * 认证体系：用户名 + 密码，会话由服务端 HttpOnly Cookie 承载
    */
-  isUnlocked() {
-    const ACCESS_PIN = '362514';
-    return localStorage.getItem('gomoku_pin') === ACCESS_PIN ||
-           sessionStorage.getItem('gomoku_pin') === ACCESS_PIN;
-  }
+  async initAuth() {
+    this.authUsername = document.getElementById('authUsername');
+    this.authPassword = document.getElementById('authPassword');
+    this.authTitle = document.getElementById('authTitle');
+    this.authDesc = document.getElementById('authDesc');
+    this.authMode = 'login';
+    this.currentUser = null;
+    this.authBusy = false;
 
-  initAuth() {
-    const ACCESS_PIN = '362514';
+    this.btnUnlockApp?.addEventListener('click', () => this.handleLogin());
+    this.authPassword?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.handleLogin();
+    });
+    this.authUsername?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.authPassword?.focus();
+    });
+    this.btnLockApp?.addEventListener('click', () => this.handleLogout());
 
-    const unlock = () => {
-      document.documentElement.classList.add('app-unlocked');
-      if (this.authOverlay) this.authOverlay.style.display = 'none';
-      if (this.goban) this.goban.setLocked(false);
-    };
-
-    const lock = () => {
-      localStorage.removeItem('gomoku_pin');
-      sessionStorage.removeItem('gomoku_pin');
-      document.documentElement.classList.remove('app-unlocked');
-      if (this.authOverlay) {
-        this.authOverlay.style.display = 'flex';
-        if (this.authPinInput) {
-          this.authPinInput.value = '';
-          this.authPinInput.focus();
-        }
-        if (this.authErrorMsg) this.authErrorMsg.textContent = '';
-      }
-      if (this.goban) this.goban.setLocked(true);
-    };
-
-    if (this.isUnlocked()) {
-      unlock();
-    } else {
-      document.documentElement.classList.remove('app-unlocked');
-      if (this.authOverlay) this.authOverlay.style.display = 'flex';
-      if (this.goban) this.goban.setLocked(true);
+    const savedName = localStorage.getItem('gomoku_username');
+    if (savedName && this.authUsername) {
+      this.authUsername.value = savedName;
+      setTimeout(() => this.authPassword?.focus(), 50);
     }
 
-    const handleAttempt = () => {
-      const val = (this.authPinInput?.value || '').trim();
-      if (val === ACCESS_PIN) {
-        if (this.authRememberMe?.checked) {
-          localStorage.setItem('gomoku_pin', ACCESS_PIN);
-        } else {
-          sessionStorage.setItem('gomoku_pin', ACCESS_PIN);
-        }
-        unlock();
-        this.showToast('✅ 密码正确，欢迎进入对弈！');
-      } else {
-        if (this.authErrorMsg) this.authErrorMsg.textContent = '密码错误，请重新输入';
-        if (this.authCard) {
-          this.authCard.classList.remove('shake');
-          void this.authCard.offsetWidth; // 触发回流动画
-          this.authCard.classList.add('shake');
-        }
-        this.authPinInput?.select();
+    // 系统里还没有账号时，切换成「创建首个管理员」模式
+    try {
+      const st = await api.bootstrapStatus();
+      if (st && st.needBootstrap) {
+        this.authMode = 'bootstrap';
+        if (this.authTitle) this.authTitle.textContent = '首次使用 · 创建管理员';
+        if (this.authDesc) this.authDesc.textContent = '系统里还没有任何账号，请创建第一个管理员';
+        if (this.btnUnlockApp) this.btnUnlockApp.textContent = '创建管理员并进入';
+      }
+    } catch (e) {
+      /* 后端不可用时先不拦，登录那一刻再报错 */
+    }
+
+    // 已有有效会话则直接进入
+    try {
+      const res = await api.me();
+      this.applyUser(res.user);
+      this.afterLogin();
+      return;
+    } catch (e) {
+      /* 未登录 */
+    }
+
+    document.documentElement.classList.remove('app-unlocked');
+    if (this.authOverlay) this.authOverlay.style.display = 'flex';
+    if (this.goban) this.goban.setLocked(true);
+  }
+
+  applyUser(user) {
+    this.currentUser = user;
+    const label = user ? `${user.displayName}${user.role === 'admin' ? ' · 管理员' : ''}` : '';
+    const navUser = document.getElementById('navUser');
+    if (navUser) navUser.textContent = label;
+    const lobbyText = document.getElementById('lobbyUserText');
+    if (lobbyText) lobbyText.textContent = label ? `👤 ${label}` : '';
+    document.querySelectorAll('#btnAdmin, #btnLobbyAdmin').forEach((b) => {
+      if (b) b.hidden = !(user && user.role === 'admin');
+    });
+  }
+
+  async handleLogin() {
+    if (this.authBusy) return;
+
+    const username = (this.authUsername?.value || '').trim();
+    const password = this.authPassword?.value || '';
+    const errEl = this.authErrorMsg;
+
+    const fail = (msg) => {
+      if (errEl) errEl.textContent = msg;
+      if (this.authCard) {
+        this.authCard.classList.remove('shake');
+        void this.authCard.offsetWidth;
+        this.authCard.classList.add('shake');
       }
     };
 
-    this.btnUnlockApp?.addEventListener('click', handleAttempt);
-    this.authPinInput?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleAttempt();
+    if (!username || !password) return fail('请输入用户名和密码');
+    if (password.length < 6) return fail('密码至少 6 位');
+
+    this.authBusy = true;
+    if (this.btnUnlockApp) this.btnUnlockApp.disabled = true;
+    if (errEl) errEl.textContent = this.authMode === 'bootstrap' ? '正在创建管理员…' : '正在登录…';
+
+    try {
+      const fn = this.authMode === 'bootstrap' ? api.bootstrap : api.login;
+      const res = await fn(username, password);
+
+      localStorage.setItem('gomoku_session', '1');
+      if (this.authRememberMe?.checked) localStorage.setItem('gomoku_username', username);
+      else localStorage.removeItem('gomoku_username');
+
+      this.applyUser(res.user);
+      this.afterLogin();
+      this.showToast(`✅ 欢迎，${res.user.displayName}`);
+    } catch (err) {
+      fail(err.message || '登录失败');
+    } finally {
+      this.authBusy = false;
+      if (this.btnUnlockApp) this.btnUnlockApp.disabled = false;
+    }
+  }
+
+  afterLogin() {
+    document.documentElement.classList.add('app-unlocked');
+    if (this.authOverlay) this.authOverlay.style.display = 'none';
+    if (this.goban) this.goban.setLocked(true);
+    this.showLobby();
+  }
+
+  async handleLogout() {
+    try {
+      await api.logout();
+    } catch (e) {
+      /* 忽略 */
+    }
+    localStorage.removeItem('gomoku_session');
+    this.stopPolling();
+    location.reload();
+  }
+
+  /* ==================== 对局大厅 ==================== */
+
+  showLobby() {
+    const lobby = document.getElementById('lobbyOverlay');
+    if (lobby) lobby.hidden = false;
+    this.bindLobbyEventsOnce();
+    this.refreshLobby();
+  }
+
+  hideLobby() {
+    const lobby = document.getElementById('lobbyOverlay');
+    if (lobby) lobby.hidden = true;
+  }
+
+  bindLobbyEventsOnce() {
+    if (this.lobbyBound) return;
+    this.lobbyBound = true;
+
+    document.getElementById('btnLobbyLogout')?.addEventListener('click', () => this.handleLogout());
+    document.getElementById('btnLobbyAdmin')?.addEventListener('click', () => this.openAdminModal());
+    document.getElementById('btnAdmin')?.addEventListener('click', () => this.openAdminModal());
+    document.getElementById('btnLobby')?.addEventListener('click', () => this.leaveToLobby());
+
+    const group = document.getElementById('lobbyColorGroup');
+    group?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.lobby-color-btn');
+      if (!btn) return;
+      group.querySelectorAll('.lobby-color-btn').forEach((b) => b.classList.remove('is-active'));
+      btn.classList.add('is-active');
     });
 
-    this.btnLockApp?.addEventListener('click', () => {
-      lock();
-      this.showToast('🔒 已锁定对弈界面');
+    document.getElementById('btnCreateGame')?.addEventListener('click', () => this.createOnlineGame());
+    document.getElementById('btnJoinGame')?.addEventListener('click', () => this.joinOnlineGame());
+    document.getElementById('lobbyRoomInput')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.joinOnlineGame();
+    });
+    document.getElementById('btnPlayAI')?.addEventListener('click', () => this.enterAIMode());
+    document.getElementById('btnAdminCreate')?.addEventListener('click', () => this.adminCreateUser());
+  }
+
+  async refreshLobby() {
+    const myEl = document.getElementById('lobbyMyGames');
+    const waitEl = document.getElementById('lobbyWaiting');
+    const onlineEl = document.getElementById('lobbyOnline');
+
+    try {
+      const [mine, lobby] = await Promise.all([api.listGames(), api.lobby()]);
+      this.renderMyGames(mine.games || []);
+      this.renderWaiting(lobby.waiting || []);
+      this.renderOnline(lobby.online || []);
+    } catch (err) {
+      if (err.status === 401) {
+        this.handleLogout();
+        return;
+      }
+      const msg = `<p class="lobby-empty">加载失败：${this.esc(err.message)}</p>`;
+      if (myEl) myEl.innerHTML = msg;
+      if (waitEl) waitEl.innerHTML = msg;
+      if (onlineEl) onlineEl.innerHTML = '';
+    }
+  }
+
+  renderMyGames(games) {
+    const el = document.getElementById('lobbyMyGames');
+    if (!el) return;
+    if (!games.length) {
+      el.innerHTML = '<p class="lobby-empty">还没有对局，创建一个房间吧</p>';
+      return;
+    }
+
+    el.innerHTML = games
+      .map((g) => {
+        const opp = g.myColor === 'black' ? g.whiteName || '等待对手' : g.blackName || '等待对手';
+        const meLabel = g.myColor === 'black' ? '黑' : '白';
+        let statusText;
+        let cls;
+        if (g.status === 'waiting') {
+          statusText = '等待对手加入';
+          cls = 'wait';
+        } else if (g.status === 'playing') {
+          statusText = g.turn === g.myColor ? '轮到你落子' : '等待对方落子';
+          cls = 'play';
+        } else {
+          const w = g.winner === 'draw' ? '和棋' : g.winner === g.myColor ? '你赢了' : '你输了';
+          statusText = `${w}${g.winReason ? ` · ${g.winReason}` : ''}`;
+          cls = 'done';
+        }
+        return `<div class="lobby-item">
+          <div class="lobby-item-main">
+            <span class="lobby-item-title">${this.esc(opp)}</span>
+            <span class="lobby-item-sub">你执${meLabel} · ${g.moveCount} 手 · 房间 ${this.esc(g.roomCode)}</span>
+          </div>
+          <div class="lobby-item-side">
+            <span class="lobby-status lobby-status-${cls}">${statusText}</span>
+            <button type="button" class="btn btn-outline-sm" data-enter="${g.id}">${g.status === 'finished' ? '查看' : '进入'}</button>
+          </div>
+        </div>`;
+      })
+      .join('');
+
+    el.querySelectorAll('[data-enter]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = Number(btn.dataset.enter);
+        const g = games.find((x) => x.id === id);
+        if (g) this.enterOnlineGame(g);
+      });
+    });
+  }
+
+  renderWaiting(list) {
+    const el = document.getElementById('lobbyWaiting');
+    if (!el) return;
+    if (!list.length) {
+      el.innerHTML = '<p class="lobby-empty">暂时没有等待中的房间</p>';
+      return;
+    }
+    el.innerHTML = list
+      .map((g) => {
+        const host = g.blackName || g.whiteName || '某位棋友';
+        const side = g.blackName ? '执黑' : '执白';
+        return `<div class="lobby-item">
+          <div class="lobby-item-main">
+            <span class="lobby-item-title">${this.esc(host)}</span>
+            <span class="lobby-item-sub">${side} · 房间 ${this.esc(g.roomCode)}</span>
+          </div>
+          <div class="lobby-item-side">
+            <button type="button" class="btn btn-outline-sm" data-room="${this.esc(g.roomCode)}">加入</button>
+          </div>
+        </div>`;
+      })
+      .join('');
+
+    el.querySelectorAll('[data-room]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const input = document.getElementById('lobbyRoomInput');
+        if (input) input.value = btn.dataset.room;
+        this.joinOnlineGame();
+      });
+    });
+  }
+
+  renderOnline(list) {
+    const el = document.getElementById('lobbyOnline');
+    if (!el) return;
+    if (!list.length) {
+      el.innerHTML = '<p class="lobby-empty">暂时没有其他在线玩家</p>';
+      return;
+    }
+    el.innerHTML = list
+      .map(
+        (u) => `<div class="lobby-item">
+          <div class="lobby-item-main"><span class="lobby-item-title">${this.esc(u.name)}</span></div>
+          <div class="lobby-item-side"><span class="lobby-status lobby-status-play">在线</span></div>
+        </div>`
+      )
+      .join('');
+  }
+
+  async createOnlineGame() {
+    const active = document.querySelector('.lobby-color-btn.is-active');
+    const myColor = active ? active.dataset.color : 'black';
+    const btn = document.getElementById('btnCreateGame');
+    if (btn) btn.disabled = true;
+
+    try {
+      const res = await api.createGame(myColor);
+      this.showToast(`✅ 房间已创建：${res.game.roomCode}，把它发给对手吧`);
+      this.enterOnlineGame(res.game);
+    } catch (err) {
+      this.showToast(`创建失败：${err.message}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async joinOnlineGame() {
+    const input = document.getElementById('lobbyRoomInput');
+    const code = (input?.value || '').trim().toUpperCase();
+    if (code.length !== 6) {
+      this.showToast('请输入 6 位房间码');
+      return;
+    }
+    try {
+      const res = await api.joinGame(code);
+      if (input) input.value = '';
+      this.enterOnlineGame(res.game);
+    } catch (err) {
+      this.showToast(`加入失败：${err.message}`);
+    }
+  }
+
+  enterAIMode() {
+    this.onlineGame = null;
+    this.stopPolling();
+    this.hideLobby();
+    if (this.startOverlay) this.startOverlay.hidden = false;
+    if (this.goban) this.goban.setLocked(true);
+    this.updateSideCard();
+  }
+
+  leaveToLobby() {
+    this.onlineGame = null;
+    this.stopPolling();
+    this.showLobby();
+  }
+
+  /* ==================== 联机对战 ==================== */
+
+  enterOnlineGame(game) {
+    this.onlineGame = { id: game.id, roomCode: game.roomCode, myColor: game.myColor };
+    this.hideLobby();
+    this.hideStartOverlay();
+    this.lastMoveCount = 0;
+    this.applyOnlineGame(game, true);
+    this.startPolling();
+    this.showToast(`进入房间 ${game.roomCode}`);
+  }
+
+  /**
+   * 把服务端对局状态合并到本地
+   * @param {Object} game 服务端返回的 game（可能是增量：只含新落子）
+   * @param {boolean} reset 是否重建棋盘
+   */
+  applyOnlineGame(game, reset = false) {
+    const incoming = game.moves || [];
+
+    if (reset) {
+      this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
+      this.moveHistory = [];
+      this.lastMoveCount = 0;
+    }
+
+    incoming.forEach((m) => {
+      if (!this.board[m.r] || this.board[m.r][m.c] !== EMPTY) return;
+      this.board[m.r][m.c] = m.color;
+      this.moveHistory.push({
+        r: m.r,
+        c: m.c,
+        color: m.color,
+        notation: m.notation,
+        comment: ''
+      });
+    });
+    this.lastMoveCount = this.moveHistory.length;
+
+    const prevStatus = this.gameStatus;
+
+    this.playerColor = game.myColor === 'black' ? BLACK : WHITE;
+    this.aiColor = this.playerColor === BLACK ? WHITE : BLACK;
+    this.turn = game.turn === 'black' ? BLACK : WHITE;
+    this.gameStatus = game.status === 'finished' ? 'ended' : 'playing';
+    this.winner =
+      game.winner === 'draw'
+        ? 'draw'
+        : game.winner === 'black'
+          ? BLACK
+          : game.winner === 'white'
+            ? WHITE
+            : null;
+
+    // 保留 myColor / id 等本地字段，其余用服务端最新值覆盖
+    this.onlineGame = {
+      ...this.onlineGame,
+      ...game,
+      moves: undefined
+    };
+
+    if (reset) {
+      this.resetReplayState();
+      this.startTimer();
+    }
+
+    const last = this.moveHistory[this.moveHistory.length - 1];
+    this.goban.setBoardState(
+      this.board,
+      last ? { r: last.r, c: last.c, color: last.color } : null,
+      this.winningLine,
+      []
+    );
+    this.goban.setTurn(this.turn);
+    this.goban.setLocked(!this.isMyOnlineTurn());
+
+    this.updateOnlineSideCard();
+    this.updateStatus();
+    this.renderMoveList();
+    this.updateReplayUI();
+
+    if (this.gameStatus === 'ended' && prevStatus !== 'ended') {
+      this.onOnlineGameEnd();
+    }
+  }
+
+  startPolling() {
+    this.stopPolling();
+    const tick = async () => {
+      if (!this.onlineGame || this.pollBusy) return;
+      this.pollBusy = true;
+      try {
+        const res = await api.getGame(this.onlineGame.id, this.lastMoveCount);
+        const g = res.game;
+        if (!g) return;
+
+        const changed =
+          g.totalMoves > this.lastMoveCount ||
+          g.status !== this.onlineGame.status ||
+          g.turn !== this.onlineGame.turn;
+
+        if (changed) this.applyOnlineGame(g, false);
+      } catch (err) {
+        if (err.status === 401) {
+          this.handleLogout();
+          return;
+        }
+        if (err.status === 403 || err.status === 404) {
+          this.showToast('对局已不可用，返回大厅');
+          this.leaveToLobby();
+          return;
+        }
+        // 其余（网络抖动等）忽略，下个周期重试
+      } finally {
+        this.pollBusy = false;
+      }
+    };
+    this.pollTimer = setInterval(tick, 2000);
+    tick();
+  }
+
+  stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  async handleOnlineClick(r, c) {
+    const g = this.onlineGame;
+    if (!g || g.status !== 'playing') return;
+    if (g.turn !== g.myColor) {
+      this.showToast('还没轮到你落子');
+      return;
+    }
+
+    const color = g.myColor === 'black' ? BLACK : WHITE;
+
+    // 本地先校验黑棋禁手，减少无效请求（服务端仍会再验一次）
+    if (color === BLACK && this.isForbiddenRuleOn()) {
+      const fb = checkForbidden(this.board, r, c, this.forbiddenOptions());
+      if (fb.isForbidden) {
+        sound.playWarning();
+        this.showToast(`⚠️ ${fb.reason}`);
+        return;
+      }
+    }
+
+    // 乐观更新，落子立刻可见
+    this.board[r][c] = color;
+    this.moveHistory.push({
+      r,
+      c,
+      color,
+      notation: coordToNotation(r, c),
+      comment: ''
+    });
+    this.goban.setBoardState(this.board, { r, c, color }, null, []);
+    this.goban.setLocked(true);
+    sound.playPlaceStone();
+
+    try {
+      const res = await api.move(g.id, r, c);
+      this.applyOnlineGame(res.game, false);
+    } catch (err) {
+      this.showToast(`落子被拒：${err.message}`);
+      // 回滚到服务端真实状态
+      try {
+        const fresh = await api.getGame(g.id, 0);
+        this.applyOnlineGame(fresh.game, true);
+      } catch (e2) {
+        /* 拉取也失败就先这样，下个轮询周期会纠正 */
+      }
+    }
+  }
+
+  async onlineResign() {
+    const g = this.onlineGame;
+    if (!g || g.status !== 'playing') return;
+    if (!confirm('确定要认输吗？')) return;
+    try {
+      const res = await api.resign(g.id);
+      this.applyOnlineGame(res.game, false);
+    } catch (err) {
+      this.showToast(`认输失败：${err.message}`);
+    }
+  }
+
+  onOnlineGameEnd() {
+    const g = this.onlineGame;
+    if (!g) return;
+    const iWon = g.winner === g.myColor;
+
+    if (g.winner === 'draw' || !iWon) sound.playLose();
+    else sound.playWin();
+
+    const text =
+      g.winner === 'draw'
+        ? '和棋，势均力敌！'
+        : iWon
+          ? `恭喜获胜${g.winReason ? `（${g.winReason}）` : ''}`
+          : `惜败${g.winReason ? `（${g.winReason}）` : ''}`;
+
+    setTimeout(() => this.showWinModal(iWon, text), 500);
+  }
+
+  updateOnlineSideCard() {
+    const g = this.onlineGame;
+    if (!g) return;
+    const titleEl = document.getElementById('aiCardTitle');
+    const tagEl = document.querySelector('.ai-tag');
+    const avatarEl = document.querySelector('.ai-avatar');
+    const oppName =
+      g.myColor === 'black' ? g.whiteName || '等待对手' : g.blackName || '等待对手';
+
+    if (titleEl) titleEl.textContent = oppName;
+    if (tagEl) tagEl.textContent = '联机对手';
+    if (avatarEl) avatarEl.textContent = '🌐';
+    if (this.aiSpeechTextEl) {
+      this.aiSpeechTextEl.textContent =
+        g.status === 'waiting'
+          ? `房间号 ${g.roomCode}，等待对手加入…`
+          : g.status === 'playing'
+            ? this.isMyOnlineTurn()
+              ? '轮到你落子'
+              : '对方思考中…'
+            : '对局已结束';
+    }
+  }
+
+  /* ==================== 用户管理（管理员） ==================== */
+
+  openAdminModal() {
+    if (!this.currentUser || this.currentUser.role !== 'admin') {
+      this.showToast('需要管理员权限');
+      return;
+    }
+    const modal = document.getElementById('adminModal');
+    if (modal) modal.classList.add('active');
+    this.refreshAdminUsers();
+  }
+
+  async refreshAdminUsers() {
+    const el = document.getElementById('adminUserList');
+    const errEl = document.getElementById('adminError');
+    if (errEl) errEl.textContent = '';
+
+    try {
+      const res = await api.listUsers();
+      this.renderAdminUsers(res.users || []);
+    } catch (err) {
+      if (err.status === 403) {
+        if (el) el.innerHTML = '<p class="lobby-empty">需要管理员权限</p>';
+        return;
+      }
+      if (el) el.innerHTML = `<p class="lobby-empty">加载失败：${this.esc(err.message)}</p>`;
+    }
+  }
+
+  renderAdminUsers(users) {
+    const el = document.getElementById('adminUserList');
+    if (!el) return;
+
+    el.innerHTML = users
+      .map((u) => {
+        const isSelf = this.currentUser && u.id === this.currentUser.id;
+        const last = u.lastLoginAt
+          ? new Date(u.lastLoginAt).toLocaleString('zh-CN', { hour12: false })
+          : '从未登录';
+        return `<div class="admin-user-row">
+          <div class="admin-user-main">
+            <span class="admin-user-name">${this.esc(u.displayName)}${
+              u.role === 'admin' ? ' <em>管理员</em>' : ''
+            }</span>
+            <span class="admin-user-sub">@${this.esc(u.username)} · ${u.gamesCount} 局 · 最近登录 ${last}</span>
+          </div>
+          <div class="admin-user-ops">
+            <button type="button" class="btn btn-outline-sm" data-reset="${u.id}">重置密码</button>
+            ${
+              isSelf
+                ? ''
+                : `<button type="button" class="btn btn-outline-danger btn-sm" data-del="${u.id}">删除</button>`
+            }
+          </div>
+        </div>`;
+      })
+      .join('');
+
+    el.querySelectorAll('[data-reset]').forEach((b) =>
+      b.addEventListener('click', () => this.adminResetPassword(Number(b.dataset.reset)))
+    );
+    el.querySelectorAll('[data-del]').forEach((b) =>
+      b.addEventListener('click', () => this.adminDeleteUser(Number(b.dataset.del)))
+    );
+  }
+
+  async adminCreateUser() {
+    const nameEl = document.getElementById('adminNewName');
+    const passEl = document.getElementById('adminNewPass');
+    const roleEl = document.getElementById('adminNewRole');
+    const errEl = document.getElementById('adminError');
+
+    const username = (nameEl?.value || '').trim();
+    const password = passEl?.value || '';
+    const role = roleEl?.value || 'user';
+
+    if (!username || password.length < 6) {
+      if (errEl) errEl.textContent = '用户名必填，密码至少 6 位';
+      return;
+    }
+
+    try {
+      await api.createUser({ username, password, role });
+      if (nameEl) nameEl.value = '';
+      if (passEl) passEl.value = '';
+      if (errEl) errEl.textContent = '';
+      this.showToast(`✅ 已创建用户 ${username}`);
+      this.refreshAdminUsers();
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message;
+    }
+  }
+
+  async adminResetPassword(id) {
+    const pw = prompt('请输入新密码（至少 6 位）');
+    if (pw === null) return;
+    if (pw.length < 6) {
+      this.showToast('密码至少 6 位');
+      return;
+    }
+    try {
+      await api.updateUser(id, { password: pw });
+      this.showToast('✅ 密码已重置，该用户的登录状态已失效');
+    } catch (err) {
+      this.showToast(`重置失败：${err.message}`);
+    }
+  }
+
+  async adminDeleteUser(id) {
+    if (!confirm('确定删除该用户吗？此操作不可恢复。')) return;
+    try {
+      await api.deleteUser(id);
+      this.showToast('✅ 用户已删除');
+      this.refreshAdminUsers();
+    } catch (err) {
+      this.showToast(`删除失败：${err.message}`);
+    }
+  }
+
+  /**
+   * 「双人同屏」已下线（改为多账号联机对战）。
+   * 这里恒返回 false，让历史上所有 isPvP() 分支自动走人机逻辑，
+   * 避免遗漏调用点造成行为不一致。
+   */
+  isPvP() {
+    return false;
+  }
+
+  /**
+   * 是否处于联机对战（对手是另一个真人账号）
+   */
+  isOnline() {
+    return !!this.onlineGame;
+  }
+
+  /** 联机模式下，当前是否轮到自己落子 */
+  isMyOnlineTurn() {
+    const g = this.onlineGame;
+    if (!g) return false;
+    return g.status === 'playing' && g.turn === g.myColor;
+  }
+
+  /* ---------------- 开局面板：先手选择 + 正式开始 ---------------- */
+
+  bindStartOverlayEvents() {
+    this.startColorBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.selectedColor = Number(btn.dataset.color) === WHITE ? WHITE : BLACK;
+        this.updateStartColorSelection();
+      });
+    });
+
+    this.btnStartGame?.addEventListener('click', () => {
+      // 把面板里的选择落到设置上，再正式开局
+      this.settings.playerColor = this.selectedColor;
+      this.persistSettings();
+      this.syncPlayerColorRadios();
+      this.startNewGame();
+      this.showToast(`⚔️ 对局开始，你${this.selectedColor === BLACK ? '执黑先行' : '执白后行'}`);
     });
   }
 
   /**
-   * 判断是否为双人同屏 (人人对弈) 模式
+   * 同步开局面板里先手选择的高亮状态
    */
-  isPvP() {
-    return this.settings.aiEngine === 'pvp';
+  updateStartColorSelection() {
+    this.startColorBtns.forEach((btn) => {
+      btn.classList.toggle('is-active', Number(btn.dataset.color) === this.selectedColor);
+    });
+  }
+
+  /**
+   * 把当前先手选择回显到设置弹窗的单选按钮上
+   */
+  syncPlayerColorRadios() {
+    document.querySelectorAll('input[name="cfgPlayerColor"]').forEach((radio) => {
+      radio.checked = Number(radio.value) === this.selectedColor;
+    });
+  }
+
+  /**
+   * 请求开始新对局：先复位棋盘并亮出开局面板，等玩家选定先手再正式开始
+   */
+  requestNewGame() {
+    if (this.isOnline()) {
+      if (confirm('离开当前联机对局并返回大厅？对局会保留，可稍后再进来。')) {
+        this.leaveToLobby();
+      }
+      return;
+    }
+
+    if (!this.startOverlay) {
+      this.startNewGame(); // 极端情况下缺少面板，直接开局兜底
+      return;
+    }
+
+    // 复位棋盘与计时，清掉上一局残留
+    this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
+    this.moveHistory = [];
+    this.winner = null;
+    this.winningLine = null;
+    this.turn = BLACK;
+    this.gameStatus = 'idle';
+    this.resetReplayState();
+    this.resetTimer();
+
+    // 回显上次的先手选择
+    this.selectedColor = Number(this.settings.playerColor) === WHITE ? WHITE : BLACK;
+    this.updateStartColorSelection();
+
+    this.goban.setBoardState(this.board, null, null, []);
+    this.goban.setTurn(BLACK);
+    this.goban.setLocked(true);
+    this.updateStatus();
+
+    this.startOverlay.hidden = false;
+  }
+
+  /**
+   * 隐藏开局面板
+   */
+  hideStartOverlay() {
+    if (this.startOverlay) this.startOverlay.hidden = true;
+  }
+
+  /**
+   * 开局面板是否正显示（未确认先手前棋盘应保持锁定）
+   */
+  isStartPanelOpen() {
+    return !!(this.startOverlay && !this.startOverlay.hidden);
   }
 
   /**
@@ -376,6 +1111,8 @@ class GomokuApp {
    * 开始新对局
    */
   startNewGame() {
+    this.hideStartOverlay();
+
     this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
     this.moveHistory = [];
     this.winner = null;
@@ -417,9 +1154,15 @@ class GomokuApp {
    * 玩家点击棋盘
    */
   handlePlayerClick(r, c) {
-    if (!this.isUnlocked()) return;
+    if (!this.currentUser) return;
     if (this.gameStatus !== 'playing') return;
     if (this.board[r][c] !== EMPTY) return;
+
+    // ===== 联机对战：走网络，等对手确认 =====
+    if (this.isOnline()) {
+      this.handleOnlineClick(r, c);
+      return;
+    }
 
     if (this.isPvP()) {
       // ===== 双人同屏 (人人对弈) =====
@@ -812,6 +1555,10 @@ class GomokuApp {
    * 悔棋处理
    */
   handleUndo() {
+    if (this.isOnline()) {
+      this.showToast('联机对局不支持悔棋');
+      return;
+    }
     if (this.replay.external) {
       this.showToast('正在复盘历史对局，请先点「返回当前对局」再悔棋');
       return;
@@ -875,6 +1622,10 @@ class GomokuApp {
    * 玩家认输
    */
   handleResign() {
+    if (this.isOnline()) {
+      this.onlineResign();
+      return;
+    }
     if (this.gameStatus !== 'playing') return;
 
     if (this.isPvP()) {
@@ -931,6 +1682,11 @@ class GomokuApp {
   handleHint() {
     if (this.replay.active) {
       this.showToast(this.replay.external ? '复盘历史对局中，请先返回当前对局' : '回放模式下不可取提示，请先返回当前对局');
+      return;
+    }
+
+    if (this.isOnline()) {
+      this.showToast('联机对局不支持走法提示');
       return;
     }
 
@@ -1912,7 +2668,12 @@ class GomokuApp {
    */
   updateStatus() {
     if (this.gameStatus === 'playing') {
-      if (this.isPvP()) {
+      if (this.isOnline()) {
+        const myTurn = this.isMyOnlineTurn();
+        this.statusTextEl.textContent = myTurn ? '轮到您落子' : '等待对方落子…';
+        this.turnBadgeEl.className = `turn-badge ${this.turn === BLACK ? 'turn-black' : 'turn-white'}`;
+        this.turnBadgeEl.textContent = this.turn === BLACK ? '黑方回合' : '白方回合';
+      } else if (this.isPvP()) {
         this.statusTextEl.textContent = this.turn === BLACK ? '轮到黑方落子 (先手)' : '轮到白方落子 (后手)';
         this.turnBadgeEl.className = `turn-badge ${this.turn === BLACK ? 'turn-black' : 'turn-white'}`;
         this.turnBadgeEl.textContent = this.turn === BLACK ? '黑方回合' : '白方回合';
@@ -1925,7 +2686,15 @@ class GomokuApp {
     } else if (this.gameStatus === 'ended') {
       this.turnBadgeEl.className = 'turn-badge turn-ended';
       this.turnBadgeEl.textContent = '对局结束';
-      if (this.isPvP()) {
+      if (this.isOnline()) {
+        if (this.winner === 'draw') {
+          this.statusTextEl.textContent = '握手言和！';
+        } else if (this.winner === this.playerColor) {
+          this.statusTextEl.textContent = '🎉 恭喜获得胜利！';
+        } else {
+          this.statusTextEl.textContent = '⚔️ 惜败，再接再厉！';
+        }
+      } else if (this.isPvP()) {
         if (this.winner === 'draw') {
           this.statusTextEl.textContent = '握手言和！';
         } else {
@@ -1946,7 +2715,10 @@ class GomokuApp {
   updateEngineBadge() {
     const badge = document.getElementById('engineBadge');
     if (badge) {
-      if (this.isPvP()) {
+      if (this.isOnline()) {
+        badge.textContent = '联机对战';
+        badge.className = 'badge badge-llm';
+      } else if (this.isPvP()) {
         badge.textContent = '双人对弈';
         badge.className = 'badge badge-pvp';
       } else if (this.settings.aiEngine === 'llm') {
@@ -2229,7 +3001,7 @@ class GomokuApp {
       this.showToast('设置已保存');
 
       if ((colorChanged || modeChanged) && confirm('对弈模式或执棋方已发生变动，是否立即重新开局？')) {
-        this.startNewGame();
+        this.requestNewGame();
       }
     });
   }
@@ -2455,12 +3227,12 @@ class GomokuApp {
 
     if (this.gameStatus === 'playing' && this.moveHistory.length > 0) {
       if (confirm('已套用云端配置，对弈模式或执棋方有变化，是否立即重新开局？')) {
-        this.startNewGame();
+        this.requestNewGame();
       } else {
         this.restoreLiveView();
       }
     } else {
-      this.startNewGame();
+      this.requestNewGame();
     }
     return { changed };
   }

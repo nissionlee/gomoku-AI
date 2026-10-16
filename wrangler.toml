@@ -6,3 +6,9 @@ compatibility_date = "2024-09-01"
 [[kv_namespaces]]
 binding = "SETTINGS_KV"
 id = "90c49f4cee934024ab6551d93a6a412c"
+
+# 用户 / 会话 / 对局数据：D1 (SQLite)
+[[d1_databases]]
+binding = "DB"
+database_name = "gomoku-ai-db"
+database_id = "0372fe1a-dea2-4122-b867-b6039a9b2191"

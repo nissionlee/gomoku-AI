@@ -41,10 +41,24 @@ export class Goban {
   resize() {
     const parent = this.canvas.parentElement;
     if (!parent) return;
-    const containerWidth = parent.clientWidth;
-    // 保持正方形，同时兼顾横竖屏与电子书/手机视口高度，确保下方工具栏可见
-    const maxByHeight = window.innerHeight ? Math.max(280, window.innerHeight * 0.60) : 680;
-    const size = Math.floor(Math.min(containerWidth, 680, maxByHeight));
+
+    // 可用空间由父容器（.goban-frame）决定：扣掉木框内边距
+    const cs = window.getComputedStyle(parent);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const availW = Math.max(200, parent.clientWidth - padX);
+    const availH = Math.max(200, parent.clientHeight - padY);
+
+    // 棋盘必须保持正方形：取可用宽高的较小值
+    let size = Math.min(availW, availH);
+
+    // 视口高度兜底，避免棋盘把下方工具栏整个挤出屏幕
+    if (window.innerHeight) {
+      const cap = Math.max(240, window.innerHeight - this.reservedViewportHeight());
+      size = Math.min(size, cap);
+    }
+
+    size = Math.floor(size);
     const dpr = window.devicePixelRatio || 1;
 
     this.canvas.width = size * dpr;
@@ -61,6 +75,28 @@ export class Goban {
     this.stoneRadius = this.cellSize * 0.44;
 
     this.render();
+  }
+
+  /**
+   * 估算棋盘之外必须占用的视口高度（导航、战绩横幅，以及单栏布局时棋盘下方的状态栏与工具栏），
+   * 用于给棋盘尺寸兜底，防止把下方内容挤出屏幕。
+   */
+  reservedViewportHeight() {
+    const measure = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return 0;
+      const rect = el.getBoundingClientRect();
+      return rect.height || 0;
+    };
+
+    let h = measure('.navbar') + measure('.stats-banner') + 32;
+
+    // 单栏布局（断点与 CSS 保持一致）时，棋盘下方还压着状态栏与工具栏
+    if (window.innerWidth <= 1024) {
+      h += measure('.board-status-bar') + measure('.toolbar') + 32;
+    }
+
+    return h;
   }
 
   initEvents() {

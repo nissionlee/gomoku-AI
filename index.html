@@ -3,15 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
-  <title>弈境五子棋 · AI 对弈平台 (Gomoku AI)</title>
-  <meta name="description" content="在线五子棋对弈网页版，支持本地高难度算法与大模型(DeepSeek/Gemini/OpenAI)接入，先手三三四四禁手规则，悔棋与战绩保存。">
-  <link rel="stylesheet" href="css/style.css?v=2026.10.08b">
+  <title>弈境五子棋 · 多用户联机与 AI 对弈</title>
+  <meta name="description" content="在线五子棋平台：多账号登录、实时联机对战、人机对弈（本地算法 / 大模型 DeepSeek、Gemini、OpenAI），先手三三四四禁手规则。">
+  <link rel="stylesheet" href="css/style.css?v=2026.10.16">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23222'/><circle cx='40' cy='38' r='10' fill='%23666'/></svg>">
   <script>
     (function() {
       try {
-        var pin = localStorage.getItem('gomoku_pin') || sessionStorage.getItem('gomoku_pin');
-        if (pin === '362514') {
+        // 上次登录过的设备先乐观放行，避免闪一下登录页；
+        // 真正的会话校验由 app.js 调 /api/auth/me 完成，失败会退回登录页。
+        if (localStorage.getItem('gomoku_session') === '1') {
           document.documentElement.classList.add('app-unlocked');
         }
       } catch (e) {}
@@ -19,25 +20,104 @@
   </script>
 </head>
 <body>
-  <!-- 专属访问密码锁屏 (密码: 362514) -->
+  <!-- 登录 / 首次初始化 -->
   <div id="authOverlay" class="auth-overlay">
     <div class="auth-card" id="authCard">
       <div class="auth-icon">☯</div>
-      <h2 class="auth-title">弈境五子棋 · 私人专属</h2>
-      <p class="auth-desc">此为私人对弈空间，请输入访问密码以解锁进入</p>
-      
+      <h2 class="auth-title" id="authTitle">弈境五子棋</h2>
+      <p class="auth-desc" id="authDesc">请输入用户名与密码登录</p>
+
       <div class="auth-input-group">
-        <input type="password" id="authPinInput" class="auth-input" maxlength="10" placeholder="••••••" autofocus inputmode="numeric">
+        <input type="text" id="authUsername" class="auth-input" maxlength="20"
+               placeholder="用户名" autocomplete="username" autofocus>
+        <input type="password" id="authPassword" class="auth-input" maxlength="128"
+               placeholder="密码" autocomplete="current-password">
       </div>
 
       <div class="auth-remember-row">
         <label class="checkbox-label">
-          <input type="checkbox" id="authRememberMe" checked> 在此设备记住密码（下次免输）
+          <input type="checkbox" id="authRememberMe" checked> 记住用户名
         </label>
       </div>
 
-      <button id="btnUnlockApp" class="btn btn-primary btn-block">解锁进入对弈</button>
+      <button id="btnUnlockApp" class="btn btn-primary btn-block">登录</button>
       <div id="authErrorMsg" class="auth-error-msg"></div>
+    </div>
+  </div>
+
+  <!-- 对局大厅 -->
+  <div id="lobbyOverlay" class="lobby-overlay" hidden>
+    <div class="lobby-panel">
+      <header class="lobby-head">
+        <div class="lobby-brand"><span class="logo-icon">☯</span> 对局大厅</div>
+        <div class="lobby-user">
+          <span id="lobbyUserText" class="lobby-user-text"></span>
+          <button type="button" id="btnLobbyAdmin" class="btn btn-outline-sm" hidden>👥 用户管理</button>
+          <button type="button" id="btnLobbyLogout" class="btn btn-outline-sm">退出登录</button>
+        </div>
+      </header>
+
+      <div class="lobby-grid">
+        <section class="lobby-card">
+          <h3>♟ 开始对局</h3>
+          <p class="card-hint">选好执棋方创建房间，把房间码发给对手</p>
+          <div class="lobby-color-group" id="lobbyColorGroup">
+            <button type="button" class="lobby-color-btn is-active" data-color="black">执黑先行</button>
+            <button type="button" class="lobby-color-btn" data-color="white">执白后行</button>
+            <button type="button" class="lobby-color-btn" data-color="random">随机</button>
+          </div>
+          <button type="button" id="btnCreateGame" class="btn btn-primary btn-block">＋ 创建房间</button>
+
+          <hr class="lobby-hr">
+          <h4>🔗 加入房间</h4>
+          <div class="lobby-join-row">
+            <input type="text" id="lobbyRoomInput" class="form-control" maxlength="6"
+                   placeholder="6 位房间码" autocomplete="off">
+            <button type="button" id="btnJoinGame" class="btn btn-info">加入</button>
+          </div>
+
+          <hr class="lobby-hr">
+          <h4>🤖 与 AI 对弈</h4>
+          <p class="card-hint">不等人，直接和本地算法或大模型下一局</p>
+          <button type="button" id="btnPlayAI" class="btn btn-secondary btn-block">进入人机对弈</button>
+        </section>
+
+        <section class="lobby-card">
+          <h3>📋 我的对局</h3>
+          <div id="lobbyMyGames" class="lobby-list"><p class="lobby-empty">加载中…</p></div>
+        </section>
+
+        <section class="lobby-card">
+          <h3>⏳ 等待中的房间</h3>
+          <div id="lobbyWaiting" class="lobby-list"><p class="lobby-empty">加载中…</p></div>
+          <hr class="lobby-hr">
+          <h3>🟢 在线玩家</h3>
+          <div id="lobbyOnline" class="lobby-list"><p class="lobby-empty">加载中…</p></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- 用户管理（仅管理员） -->
+  <div id="adminModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>👥 用户管理</h2>
+        <button class="modal-close" id="btnAdminClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="admin-create">
+          <input type="text" id="adminNewName" class="form-control" placeholder="用户名（3-20位）" maxlength="20">
+          <input type="password" id="adminNewPass" class="form-control" placeholder="密码（≥6位）" maxlength="128">
+          <select id="adminNewRole" class="form-control">
+            <option value="user">普通用户</option>
+            <option value="admin">管理员</option>
+          </select>
+          <button type="button" id="btnAdminCreate" class="btn btn-primary">＋ 新建</button>
+        </div>
+        <div id="adminError" class="admin-error"></div>
+        <div id="adminUserList" class="admin-user-list"></div>
+      </div>
     </div>
   </div>
 
@@ -66,13 +146,15 @@
           <select id="engineSelect" class="form-select-sm">
             <option value="local" selected>本地算法 (人机)</option>
             <option value="llm">大模型 (人机)</option>
-            <option value="pvp">双人同屏 (人人)</option>
           </select>
         </div>
 
+        <button id="btnLobby" class="btn-icon" title="返回对局大厅">🏛 大厅</button>
         <button id="btnSoundToggle" class="btn-icon" title="切换声音">🔊 声音开</button>
         <button id="btnRules" class="btn-icon" title="五子棋与禁手规则">📖 规则</button>
-        <button id="btnLockApp" class="btn-icon" title="锁定对弈界面">🔒 锁屏</button>
+        <button id="btnAdmin" class="btn-icon" title="用户管理（仅管理员）" hidden>👥 用户</button>
+        <span class="nav-user" id="navUser" title="当前登录用户"></span>
+        <button id="btnLockApp" class="btn-icon" title="退出登录">🚪 退出</button>
       </div>
     </header>
 
@@ -92,9 +174,36 @@
       <section class="board-wrapper">
         <div class="goban-frame">
           <canvas id="boardCanvas"></canvas>
-        </div>
 
-        <!-- 棋盘下方状态卡 -->
+          <!-- 开局面板：选择先手 → 正式开始 -->
+          <div class="start-overlay" id="startOverlay">
+            <div class="start-card">
+              <div class="start-icon">☯</div>
+              <h2 class="start-title">准备开局</h2>
+              <p class="start-desc">选择你的执棋方，点击「开始对局」正式落子</p>
+
+              <div class="start-color-group" id="startColorGroup">
+                <button type="button" class="start-color-btn is-active" data-color="1">
+                  <span class="stone-dot stone-dot-black"></span>
+                  <span class="start-color-name">执黑先行</span>
+                  <span class="start-color-hint">先手 · 受三三/四四禁手限制</span>
+                </button>
+                <button type="button" class="start-color-btn" data-color="2">
+                  <span class="stone-dot stone-dot-white"></span>
+                  <span class="start-color-name">执白后行</span>
+                  <span class="start-color-hint">后手 · 无禁手限制</span>
+                </button>
+              </div>
+
+              <button type="button" id="btnStartGame" class="btn btn-primary btn-block">▶ 开始对局</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 侧边栏：对局控制面板 + AI 棋手卡片与对话 -->
+      <aside class="side-panel">
+        <!-- 对局状态卡 -->
         <div class="board-status-bar">
           <div class="status-left">
             <span id="turnBadge" class="turn-badge turn-black">黑方回合</span>
@@ -139,10 +248,7 @@
             <span class="btn-icon-text">⚙️</span> 设置
           </button>
         </div>
-      </section>
 
-      <!-- 侧边栏：AI 棋手卡片与对话 -->
-      <aside class="side-panel">
         <!-- AI 卡片 -->
         <div class="panel-card ai-card">
           <div class="ai-avatar-wrapper">
@@ -262,10 +368,8 @@
             <label class="radio-label">
               <input type="radio" name="cfgAiEngine" value="llm"> 大模型 API (人机对弈，DeepSeek/Gemini等)
             </label>
-            <label class="radio-label">
-              <input type="radio" name="cfgAiEngine" value="pvp"> 双人同屏对弈 (人人对弈，家人朋友轮流落子)
-            </label>
           </div>
+          <p class="card-hint">想和其他棋友对弈？请到「大厅」创建房间，或输入对方的房间码加入。</p>
         </div>
 
         <!-- 本地难度选择 -->

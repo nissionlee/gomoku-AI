@@ -42,7 +42,7 @@ export class StorageManager {
       const data = localStorage.getItem(SETTINGS_KEY);
       if (data) {
         const parsed = JSON.parse(data);
-        return {
+        const merged = {
           ...DEFAULT_SETTINGS,
           ...parsed,
           llmConfig: {
@@ -50,6 +50,11 @@ export class StorageManager {
             ...(parsed.llmConfig || {})
           }
         };
+        // 「双人同屏」已下线：老配置里的 pvp 一律归一到本地人机，避免进不去对局
+        if (merged.aiEngine !== 'local' && merged.aiEngine !== 'llm') {
+          merged.aiEngine = 'local';
+        }
+        return merged;
       }
     } catch (e) {
       console.warn('Failed to load settings:', e);
