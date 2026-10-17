@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>手数标注预览</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #181412;
+    color: #e8e0d4;
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+  }
+  .wrap { padding: 10px 16px 16px; }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; letter-spacing: .5px; color: #d8c9b4; }
+  .board-wrapper { display: flex; justify-content: center; }
+  .goban-frame {
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #a46a36;
+    padding: 8px;
+    border: 3px solid #663914;
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas { display: block; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2 id="title">手数标注预览</h2>
+  <div class="board-wrapper">
+    <div class="goban-frame"><canvas id="board"></canvas></div>
+  </div>
+</div>
+
+<script type="module">
+import { Goban } from '../js/board.js';
+import { EMPTY, BLACK, WHITE, BOARD_SIZE } from '../js/rules.js';
+
+// ?mode=3 → 三位数手数（最坏情况，看会不会溢出棋子）
+const MODE = new URLSearchParams(location.search).get('mode') || '2';
+
+const canvas = document.getElementById('board');
+const goban = new Goban(canvas, { showCoordinates: true, showForbiddenMarks: false, showMoveNumbers: true });
+window.goban = goban;
+
+const board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
+const moves = [];
+
+/** 依次落子（黑先白后），并写进盘面 */
+function place(list) {
+  list.forEach(([r, c], i) => {
+    const color = i % 2 === 0 ? BLACK : WHITE;
+    board[r][c] = color;
+    moves.push({ r, c, color });
+  });
+}
+
+if (MODE === '3') {
+  document.getElementById('title').textContent = '三位数手数（100-105 手，最坏情况）';
+  // 顺序铺满前 105 个交叉点：专测「三位数会不会溢出棋子」
+  const seq = [];
+  for (let r = 0; r < BOARD_SIZE && seq.length < 105; r++) {
+    for (let c = 0; c < BOARD_SIZE && seq.length < 105; c++) seq.push([r, c]);
+  }
+  place(seq);
+} else {
+  document.getElementById('title').textContent = '中盘 20 手（两位数手数）';
+  place([
+    [7, 7], [6, 6], [8, 6], [6, 8], [8, 8],
+    [7, 5], [5, 7], [9, 9], [4, 8], [5, 5],
+    [9, 5], [3, 6], [10, 7], [2, 5], [11, 9],
+    [4, 10], [12, 4], [10, 11], [6, 11], [8, 12],
+  ]);
+}
+
+const last = moves[moves.length - 1];
+goban.setBoardState(board, { r: last.r, c: last.c, color: last.color }, null, [], [], moves);
+goban.setLocked(true);
+
+// 供截图脚本确认渲染完成
+document.title = `ready-${moves.length}`;
+</script>
+</body>
+</html>

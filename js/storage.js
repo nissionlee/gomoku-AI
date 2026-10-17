@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
   checkDoubleThree: true,      // 开启先手三三禁手
   checkDoubleFour: true,       // 开启先手四四禁手
   showForbiddenMarks: true,    // 棋盘上提示禁手点
+  showMoveNumbers: true,       // 在棋子中心标注手数（电子墨水屏上辨识度更高）
   soundEnabled: true,          // 音效
   llmConfig: {
     provider: 'deepseek',

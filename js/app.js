@@ -89,7 +89,8 @@ class GomokuApp {
     // 棋盘 Canvas 实例
     this.goban = new Goban(this.canvasEl, {
       showCoordinates: true,
-      showForbiddenMarks: this.settings.showForbiddenMarks
+      showForbiddenMarks: this.settings.showForbiddenMarks,
+      showMoveNumbers: this.settings.showMoveNumbers !== false
     });
     this.goban.onCellClick = (r, c) => this.handlePlayerClick(r, c);
     this.goban.onCellInspect = (r, c) => this.handleInspectClick(r, c);
@@ -700,7 +701,9 @@ class GomokuApp {
       this.board,
       last ? { r: last.r, c: last.c, color: last.color } : null,
       this.winningLine,
-      []
+      [],
+      [],
+      this.moveHistory
     );
     this.goban.setTurn(this.turn);
     this.goban.setLocked(!this.isMyOnlineTurn());
@@ -786,7 +789,7 @@ class GomokuApp {
       notation: coordToNotation(r, c),
       comment: ''
     });
-    this.goban.setBoardState(this.board, { r, c, color }, null, []);
+    this.goban.setBoardState(this.board, { r, c, color }, null, [], [], this.moveHistory);
     this.goban.setLocked(true);
     sound.playPlaceStone();
 
@@ -1070,7 +1073,7 @@ class GomokuApp {
     this.selectedColor = Number(this.settings.playerColor) === WHITE ? WHITE : BLACK;
     this.updateStartColorSelection();
 
-    this.goban.setBoardState(this.board, null, null, []);
+    this.goban.setBoardState(this.board, null, null, [], [], []);
     this.goban.setTurn(BLACK);
     this.goban.setLocked(true);
     this.updateStatus();
@@ -1148,7 +1151,7 @@ class GomokuApp {
     this.startTimer();
 
     // 重置棋盘显示
-    this.goban.setBoardState(this.board, null, null, this.calculateForbiddenPoints());
+    this.goban.setBoardState(this.board, null, null, this.calculateForbiddenPoints(), [], this.moveHistory);
     this.goban.setTurn(this.turn);
     this.goban.setLocked(false);
 
@@ -1264,7 +1267,7 @@ class GomokuApp {
       ? this.calculateForbiddenPoints()
       : [];
 
-    this.goban.setBoardState(this.board, { r, c, color }, null, forbidden);
+    this.goban.setBoardState(this.board, { r, c, color }, null, forbidden, [], this.moveHistory);
     this.goban.setTurn(color === BLACK ? WHITE : BLACK);
   }
 
@@ -1507,7 +1510,7 @@ class GomokuApp {
       this.goban.setLocked(true);
 
       if (!this.replay.active) {
-        this.goban.setBoardState(this.board, { r: lastR, c: lastC, color: lastColor }, winResult.winLine, []);
+        this.goban.setBoardState(this.board, { r: lastR, c: lastC, color: lastColor }, winResult.winLine, [], [], this.moveHistory);
       }
 
       // 双人人人对战模式结算
@@ -1734,7 +1737,7 @@ class GomokuApp {
       ? this.calculateForbiddenPoints()
       : [];
 
-    this.goban.setBoardState(this.board, previousMove, null, forbidden);
+    this.goban.setBoardState(this.board, previousMove, null, forbidden, [], this.moveHistory);
     this.goban.setTurn(this.turn);
     this.goban.setLocked(false);
 
@@ -2050,7 +2053,8 @@ class GomokuApp {
       focus ? { r: focus.r, c: focus.c, color: focus.color } : null,
       winLine,
       [],
-      trail
+      trail,
+      moves.slice(0, idx)
     );
     this.goban.setTurn(focus ? (focus.color === BLACK ? WHITE : BLACK) : BLACK);
     this.goban.setHighlight(null);
@@ -2122,7 +2126,9 @@ class GomokuApp {
       this.board,
       last ? { r: last.r, c: last.c, color: last.color } : null,
       this.winningLine,
-      forbidden
+      forbidden,
+      [],
+      this.moveHistory
     );
     this.goban.setTurn(this.turn);
 
@@ -3045,6 +3051,9 @@ class GomokuApp {
     const showForbiddenMarks = document.getElementById('cfgShowForbiddenMarks');
     if (showForbiddenMarks) showForbiddenMarks.checked = this.settings.showForbiddenMarks;
 
+    const showMoveNumbers = document.getElementById('cfgShowMoveNumbers');
+    if (showMoveNumbers) showMoveNumbers.checked = this.settings.showMoveNumbers !== false;
+
     // LLM 相关表单
     const llmProvider = document.getElementById('cfgLlmProvider');
     const llmBaseUrl = document.getElementById('cfgLlmBaseUrl');
@@ -3161,6 +3170,8 @@ class GomokuApp {
 
       this.persistSettings();
       this.goban.options.showForbiddenMarks = next.showForbiddenMarks;
+      this.goban.options.showMoveNumbers = next.showMoveNumbers !== false;
+      this.goban.render();
       this.difficultySelect.value = next.difficulty;
       this.engineSelect.value = next.aiEngine;
       this.updateEngineBadge();
@@ -3185,6 +3196,7 @@ class GomokuApp {
       checkDoubleThree: document.getElementById('cfgCheckDoubleThree')?.checked ?? true,
       checkDoubleFour: document.getElementById('cfgCheckDoubleFour')?.checked ?? true,
       showForbiddenMarks: document.getElementById('cfgShowForbiddenMarks')?.checked ?? true,
+      showMoveNumbers: document.getElementById('cfgShowMoveNumbers')?.checked ?? true,
       llmConfig: {
         provider: document.getElementById('cfgLlmProvider')?.value || 'deepseek',
         baseUrl: document.getElementById('cfgLlmBaseUrl')?.value || '',
@@ -3381,6 +3393,7 @@ class GomokuApp {
 
     sound.setMuted(this.settings.soundEnabled === false);
     this.goban.options.showForbiddenMarks = this.settings.showForbiddenMarks !== false;
+    this.goban.options.showMoveNumbers = this.settings.showMoveNumbers !== false;
 
     this.syncSettingsToUI();
     this.updateSoundButton();

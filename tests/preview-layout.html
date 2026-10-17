@@ -43,9 +43,18 @@ function reveal() {
   ['#authOverlay', '#startOverlay', '#lobbyOverlay', '#adminModal', '#settingsModal', '#winModal']
     .forEach(sel => { const el = doc.querySelector(sel); if (el) { el.hidden = true; el.style.display = 'none'; } });
 
-  // 摆几颗子，方便看清棋盘边界
-  app.board[6][7] = 1; app.board[6][8] = 2; app.board[7][7] = 1; app.board[5][7] = 2;
-  app.goban.setBoardState(app.board, null, null, []);
+  // 摆一个 20 手的中盘，**走真实链路**（moveHistory → restoreLiveView → setBoardState），
+  // 顺便验证「棋子上标注手数」在真实 app 里也生效
+  const demo = [
+    [7, 7], [6, 6], [8, 6], [6, 8], [8, 8],
+    [7, 5], [5, 7], [9, 9], [4, 8], [5, 5],
+    [9, 5], [3, 6], [10, 7], [2, 5], [11, 9],
+    [4, 10], [12, 4], [10, 11], [6, 11], [8, 12],
+  ];
+  app.board = Array.from({ length: 15 }, () => Array(15).fill(0));
+  app.moveHistory = demo.map(([r, c], i) => ({ r, c, color: i % 2 === 0 ? 1 : 2, notation: '', comment: '' }));
+  app.moveHistory.forEach(m => { app.board[m.r][m.c] = m.color; });
+  app.restoreLiveView();
 
   if (IN_GAME) {
     app.gameStatus = 'playing';

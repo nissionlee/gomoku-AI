@@ -16,6 +16,7 @@ export class Goban {
     this.options = {
       showCoordinates: true,
       showForbiddenMarks: true,
+      showMoveNumbers: true,     // 在棋子中心标注手数（电子墨水屏/低对比度屏上辨识度更高）
       ...options
     };
 
@@ -25,6 +26,7 @@ export class Goban {
     this.winningLine = null;     // Array<[r, c]>
     this.forbiddenPoints = [];   // Array<{ r, c }>
     this.trail = [];             // 回放轨迹 Array<{ r, c, color }>
+    this.moveOrder = [];         // 完整手序 Array<{ r, c, color }>，用于在棋子上标注第几手
     this.turnColor = BLACK;
     this.isLocked = false;       // AI 思考或游戏结束时锁定
     this.reviewOnly = false;     // 回放只读模式：点击棋子用于跳手而非落子
@@ -280,13 +282,24 @@ export class Goban {
    * @param {Array<[number,number]>|null} winningLine 五连高亮
    * @param {Array<{r:number,c:number}>} forbiddenPoints 禁手标记
    * @param {Array<{r:number,c:number,color:number}>} trail 回放落子轨迹（由早到晚）
+   * @param {Array<{r:number,c:number,color:number}>} moveOrder 完整手序（由早到晚），
+   *        用于在每颗棋子上标注「这是第几手」。不传则沿用上一次的。
    */
-  setBoardState(board, lastMove = null, winningLine = null, forbiddenPoints = [], trail = []) {
+  setBoardState(board, lastMove = null, winningLine = null, forbiddenPoints = [], trail = [], moveOrder = null) {
     this.board = board;
     this.lastMove = lastMove;
     this.winningLine = winningLine;
     this.forbiddenPoints = forbiddenPoints;
     this.trail = trail || [];
+    if (moveOrder) this.moveOrder = moveOrder;
+    this.render();
+  }
+
+  /**
+   * 单独更新手序（不重绘时用，例如只改了设置）
+   */
+  setMoveOrder(moveOrder) {
+    this.moveOrder = Array.isArray(moveOrder) ? moveOrder : [];
     this.render();
   }
 
@@ -365,6 +378,11 @@ export class Goban {
     // 8. 绘制获胜连线发光效果
     if (this.winningLine && this.winningLine.length >= 5) {
       this.drawWinningLine(ctx, this.winningLine);
+    }
+
+    // 8.5 绘制每颗棋子上的手数（画在轨迹/高亮之上，保证数字始终看得清）
+    if (this.options.showMoveNumbers) {
+      this.drawMoveNumbers(ctx);
     }
 
     // 9. 绘制鼠标/触摸虚影
@@ -532,6 +550,14 @@ export class Goban {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
 
+    // 白子在浅色木纹上边界容易糊（电子墨水屏把两者压成同一个灰阶），
+    // 补一圈深色描边把轮廓勾出来；黑子本来就够黑，不需要。
+    if (color !== BLACK) {
+      ctx.strokeStyle = 'rgba(92, 58, 24, 0.55)';
+      ctx.lineWidth = Math.max(1, r * 0.07);
+      ctx.stroke();
+    }
+
     // 顶部弧面高光微光点
     const shineGrad = ctx.createRadialGradient(
       x - r * 0.32, y - r * 0.36, 0,
@@ -608,9 +634,84 @@ export class Goban {
     ctx.restore();
   }
 
+  /**
+   * 在每颗棋子上标注「这是第几手」。
+   *
+   * 为什么需要：电子墨水屏 / 低对比度屏上黑白子的明度差被压缩，
+   * 光看颜色很难分清谁是谁的、哪颗是新下的。把手数直接打在棋子中心，
+   * 既能一眼看清顺序，也能靠奇偶快速判断归属（单数黑、双数白）。
+   *
+   * 可读性处理：数字加一圈反差描边（黑子配深描边 + 白字，白子配浅描边 + 深字），
+   * 灰阶屏上也能立住；三位数自动缩字号，避免溢出棋子边缘。
+   */
+  drawMoveNumbers(ctx) {
+    const order = this.moveOrder;
+    if (!order || order.length === 0) return;
+
+    // 同一交叉点若出现多手（旧版本遗留的脏数据），以最后一手为准
+    const seq = new Map();
+    for (let i = 0; i < order.length; i++) {
+      const m = order[i];
+      if (!m || !inBoard(m.r, m.c)) continue;
+      seq.set(m.r * BOARD_SIZE + m.c, i + 1);
+    }
+    if (seq.size === 0) return;
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+
+    seq.forEach((num, key) => {
+      const r = Math.floor(key / BOARD_SIZE);
+      const c = key % BOARD_SIZE;
+      const color = this.board[r][c];
+      if (color === EMPTY) return; // 回放没走到这手，或该点已被提走
+
+      const x = this.margin + c * this.cellSize;
+      const y = this.margin + r * this.cellSize;
+
+      const label = String(num);
+      const scale = label.length >= 3 ? 0.72 : (label.length === 2 ? 0.98 : 1.1);
+      const fontSize = Math.max(8, this.stoneRadius * scale);
+
+      ctx.font = `700 ${fontSize}px system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif`;
+      ctx.lineWidth = Math.max(1.5, fontSize * 0.16);
+
+      if (color === BLACK) {
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.strokeText(label, x, y);
+        ctx.fillStyle = '#ffffff';
+      } else {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.strokeText(label, x, y);
+        ctx.fillStyle = '#111111';
+      }
+      ctx.fillText(label, x, y);
+    });
+
+    ctx.restore();
+  }
+
   drawLastMoveMarker(ctx, r, c, color) {
     const x = this.margin + c * this.cellSize;
     const y = this.margin + r * this.cellSize;
+
+    // 显示手数时，中心被数字占着，改成贴着棋子边缘画一圈红环
+    if (this.options.showMoveNumbers && this.moveOrder && this.moveOrder.length > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, this.stoneRadius * 0.9, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ff4d4f';
+      ctx.lineWidth = Math.max(1.8, this.stoneRadius * 0.13);
+      ctx.shadowColor = 'rgba(255, 77, 79, 0.75)';
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
     const markerRadius = this.stoneRadius * 0.3;
 
     ctx.save();
