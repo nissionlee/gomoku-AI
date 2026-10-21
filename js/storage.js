@@ -21,7 +21,9 @@ const DEFAULT_SETTINGS = {
     baseUrl: 'https://api.deepseek.com/v1',
     apiKey: '',
     model: 'deepseek-chat',
-    persona: 'humorous'
+    persona: 'humorous',
+    playstyle: 'openmind',       // 'openmind' | 'aggressive' | 'defensive' | 'balanced'
+    temperature: 0.85            // 发散度/创造力，0.1~1.2，默认 0.85 灵动下棋
   }
 };
 

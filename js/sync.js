@@ -25,6 +25,7 @@ const ENGINES = ['local', 'llm', 'pvp'];
 const DIFFICULTIES = ['low', 'medium', 'high', 'pro'];
 const PROVIDERS = ['deepseek', 'gemini', 'openai', 'qwen', 'moonshot', 'custom'];
 const PERSONAS = ['humorous', 'master', 'tsundere', 'analytical'];
+const PLAYSTYLES = ['openmind', 'aggressive', 'defensive', 'balanced'];
 const REQUEST_TIMEOUT = 15000;
 
 /* ---------------- 同步码 ---------------- */
@@ -125,7 +126,9 @@ export function buildPayload(settings, updatedAt = Date.now()) {
       baseUrl: clampString(llm.baseUrl, 200),
       apiKey: clampString(llm.apiKey, 200),
       model: clampString(llm.model, 80),
-      persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous'
+      persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous',
+      playstyle: PLAYSTYLES.includes(llm.playstyle) ? llm.playstyle : 'openmind',
+      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85
     }
   };
 
@@ -166,7 +169,9 @@ export function parseRemotePayload(payload) {
       baseUrl: clampString(llm.baseUrl, 200),
       apiKey: clampString(llm.apiKey, 200),
       model: clampString(llm.model, 80),
-      persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous'
+      persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous',
+      playstyle: PLAYSTYLES.includes(llm.playstyle) ? llm.playstyle : 'openmind',
+      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85
     }
   };
 

@@ -12,7 +12,7 @@ import {
   analyzePosition,
   formatAnalysisForLLM
 } from './analysis.js';
-import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS } from './llm.js';
+import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS, AI_PLAYSTYLES } from './llm.js';
 import { searchPro, boardToFlat } from './engine-pro.js';
 import {
   generateSyncCode,
@@ -233,11 +233,22 @@ class GomokuApp {
       this.settings.aiEngine = e.target.value;
       this.persistSettings();
       this.updateEngineBadge();
+      this.updateSideCard();
       const label = e.target.value === 'pvp'
         ? '双人同屏对弈 (人人模式)'
         : (e.target.value === 'llm' ? '大模型对弈模式' : '本地算法模式');
       this.showToast(`已切换为：${label}`);
       this.requestNewGame();
+    });
+
+    // 顶部导航栏快捷切换棋风偏好
+    const quickPlaystyleSelect = document.getElementById('quickPlaystyleSelect');
+    quickPlaystyleSelect?.addEventListener('change', (e) => {
+      this.settings.llmConfig.playstyle = e.target.value;
+      this.persistSettings();
+      this.updateSideCard();
+      const styleName = AI_PLAYSTYLES[e.target.value]?.name || '天马行空';
+      this.showToast(`棋风已切换为：${styleName}`);
     });
 
     // 静音切换
@@ -1102,20 +1113,34 @@ class GomokuApp {
     const titleEl = document.getElementById('aiCardTitle');
     const tagEl = document.querySelector('.ai-tag');
     const avatarEl = document.querySelector('.ai-avatar');
+    const playstylePill = document.getElementById('aiPlaystylePill');
 
     if (this.isPvP()) {
       if (titleEl) titleEl.textContent = '双人对弈';
       if (tagEl) tagEl.textContent = '同屏轮流博弈';
       if (avatarEl) avatarEl.textContent = '👥';
+      if (playstylePill) playstylePill.style.display = 'none';
       this.aiSpeechTextEl.textContent = '双人对弈已开启！黑方先行，双方轮流在同一屏幕落子，预祝棋逢对手！';
     } else {
-      if (titleEl) titleEl.textContent = 'AI 棋客';
-      if (tagEl) tagEl.textContent = '博弈对手';
-      if (avatarEl) avatarEl.textContent = '🤖';
       const isLLM = this.settings.aiEngine === 'llm';
       const persona = AI_PERSONAS[this.settings.llmConfig.persona] || AI_PERSONAS.humorous;
+      const playstyle = AI_PLAYSTYLES[this.settings.llmConfig.playstyle] || AI_PLAYSTYLES.openmind;
+
+      if (titleEl) titleEl.textContent = isLLM ? `AI · ${this.settings.llmConfig.model || '大模型'}` : 'AI 棋客';
+      if (tagEl) tagEl.textContent = isLLM ? persona.name : '博弈对手';
+      if (avatarEl) avatarEl.textContent = isLLM ? '🧠' : '🤖';
+
+      if (playstylePill) {
+        if (isLLM) {
+          playstylePill.textContent = playstyle.tag || playstyle.name;
+          playstylePill.style.display = 'inline-flex';
+        } else {
+          playstylePill.style.display = 'none';
+        }
+      }
+
       this.aiSpeechTextEl.textContent = isLLM
-        ? `【${persona.name}】棋局已开，请阁下落子！`
+        ? `【${persona.name} · ${playstyle.name}】棋局已开，请阁下落子！`
         : '棋逢对手，请赐教！';
     }
   }
@@ -1286,13 +1311,24 @@ class GomokuApp {
       let chosenMove;
       let aiComment = '';
 
-      if (isFirstMove) {
-        // 第一手默认落天元 H8
-        chosenMove = { r: 7, c: 7, notation: 'H8' };
-        aiComment = '天元启手，先占中宫！';
+      if (isFirstMove && this.settings.aiEngine !== 'llm') {
+        // 本地引擎第一手默认落天元 H8 (低难度偶尔出奇)
+        if (this.settings.difficulty === 'low' && Math.random() < 0.4) {
+          const firstPool = [
+            { r: 7, c: 7, notation: 'H8' },
+            { r: 6, c: 7, notation: 'H9' },
+            { r: 7, c: 6, notation: 'G8' },
+            { r: 8, c: 6, notation: 'G7' }
+          ];
+          chosenMove = firstPool[Math.floor(Math.random() * firstPool.length)];
+          aiComment = '首手落子，偏锋开局！';
+        } else {
+          chosenMove = { r: 7, c: 7, notation: 'H8' };
+          aiComment = '天元启手，先占中宫！';
+        }
       } else if (this.settings.aiEngine === 'llm') {
-        // 大模型对弈：流式输出 + 双超时，实时反馈思考进度
-        const candidates = getCandidateMoves(this.board, this.aiColor, 5, this.aiColor === BLACK && this.isForbiddenRuleOn());
+        // 大模型对弈：流式输出 + 双超时，战术棋风与自主开局（打破千篇一律的固定走法）
+        const candidates = getCandidateMoves(this.board, this.aiColor, 12, this.aiColor === BLACK && this.isForbiddenRuleOn());
         const llmResult = await getLLMMove(
           this.settings.llmConfig,
           this.board,
@@ -2888,6 +2924,9 @@ class GomokuApp {
 
   updateEngineBadge() {
     const badge = document.getElementById('engineBadge');
+    const quickPlaystyleGroup = document.getElementById('quickPlaystyleGroup');
+    const quickPlaystyleSelect = document.getElementById('quickPlaystyleSelect');
+
     if (badge) {
       if (this.isOnline()) {
         badge.textContent = '联机对战';
@@ -2901,6 +2940,14 @@ class GomokuApp {
       } else {
         badge.textContent = '本地算法';
         badge.className = 'badge badge-local';
+      }
+    }
+
+    if (quickPlaystyleGroup) {
+      const isLLM = this.settings.aiEngine === 'llm' && !this.isOnline() && !this.isPvP();
+      quickPlaystyleGroup.style.display = isLLM ? 'inline-flex' : 'none';
+      if (isLLM && quickPlaystyleSelect) {
+        quickPlaystyleSelect.value = this.settings.llmConfig.playstyle || 'openmind';
       }
     }
   }
@@ -3060,12 +3107,21 @@ class GomokuApp {
     const llmApiKey = document.getElementById('cfgLlmApiKey');
     const llmModel = document.getElementById('cfgLlmModel');
     const llmPersona = document.getElementById('cfgLlmPersona');
+    const llmPlaystyle = document.getElementById('cfgLlmPlaystyle');
+    const llmTemperature = document.getElementById('cfgLlmTemperature');
+    const tempDisplay = document.getElementById('cfgTempDisplay');
 
     if (llmProvider) llmProvider.value = this.settings.llmConfig.provider || 'deepseek';
     if (llmBaseUrl) llmBaseUrl.value = this.settings.llmConfig.baseUrl || '';
     if (llmApiKey) llmApiKey.value = this.settings.llmConfig.apiKey || '';
     if (llmModel) llmModel.value = this.settings.llmConfig.model || '';
     if (llmPersona) llmPersona.value = this.settings.llmConfig.persona || 'humorous';
+    if (llmPlaystyle) llmPlaystyle.value = this.settings.llmConfig.playstyle || 'openmind';
+    if (llmTemperature) {
+      const tempVal = typeof this.settings.llmConfig.temperature === 'number' ? this.settings.llmConfig.temperature : 0.85;
+      llmTemperature.value = tempVal;
+      if (tempDisplay) tempDisplay.textContent = Number(tempVal).toFixed(2);
+    }
 
     this.toggleLlmConfigSection(this.settings.aiEngine === 'llm');
   }
@@ -3127,6 +3183,13 @@ class GomokuApp {
       btnToggleKey.textContent = inputKey.type === 'password' ? '👁️ 显示' : '🔒 隐藏';
     });
 
+    // 发散度/温度滑动条联动显示
+    const inputTemp = document.getElementById('cfgLlmTemperature');
+    const tempDisplay = document.getElementById('cfgTempDisplay');
+    inputTemp?.addEventListener('input', (e) => {
+      if (tempDisplay) tempDisplay.textContent = Number(e.target.value).toFixed(2);
+    });
+
     // 模型体检按键：连通握手 + 真实对弈负载实测
     const btnTestLlm = document.getElementById('btnTestLlm');
     btnTestLlm?.addEventListener('click', async () => {
@@ -3134,7 +3197,9 @@ class GomokuApp {
         baseUrl: document.getElementById('cfgLlmBaseUrl').value,
         apiKey: document.getElementById('cfgLlmApiKey').value,
         model: document.getElementById('cfgLlmModel').value,
-        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous'
+        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous',
+        playstyle: document.getElementById('cfgLlmPlaystyle')?.value || 'openmind',
+        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85')
       };
 
       btnTestLlm.disabled = true;
@@ -3175,6 +3240,11 @@ class GomokuApp {
       this.difficultySelect.value = next.difficulty;
       this.engineSelect.value = next.aiEngine;
       this.updateEngineBadge();
+      const quickPlaystyleSelect = document.getElementById('quickPlaystyleSelect');
+      if (quickPlaystyleSelect && next.llmConfig?.playstyle) {
+        quickPlaystyleSelect.value = next.llmConfig.playstyle;
+      }
+      this.updateSideCard();
 
       this.settingsModal.classList.remove('active');
       this.showToast('设置已保存');
@@ -3202,7 +3272,9 @@ class GomokuApp {
         baseUrl: document.getElementById('cfgLlmBaseUrl')?.value || '',
         apiKey: document.getElementById('cfgLlmApiKey')?.value || '',
         model: document.getElementById('cfgLlmModel')?.value || '',
-        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous'
+        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous',
+        playstyle: document.getElementById('cfgLlmPlaystyle')?.value || 'openmind',
+        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85')
       }
     };
   }

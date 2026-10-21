@@ -3,8 +3,8 @@
  * 支持 OpenAI 兼容格式 (DeepSeek, OpenAI, Gemini, 阿里通义千问, Kimi, Ollama, 自定义等)
  */
 
-import { coordToNotation, notationToCoord, getCandidateMoves } from './engine.js';
-import { inBoard, EMPTY, BLACK, WHITE } from './rules.js';
+import { coordToNotation, notationToCoord, getCandidateMoves, describePoint, evaluateDirection, SCORES } from './engine.js';
+import { inBoard, EMPTY, BLACK, WHITE, DIRECTIONS, checkForbidden } from './rules.js';
 
 export const PROVIDER_PRESETS = {
   deepseek: {
@@ -74,6 +74,52 @@ export const AI_PERSONAS = {
   }
 };
 
+export const AI_PLAYSTYLES = {
+  openmind: {
+    name: '天马行空',
+    tag: '🌌 灵动奇谋',
+    desc: '视野开阔，格局宏大。善用大局外势、跳三奇袭与意料之外的巧手，打破千篇一律的局部套路。',
+    defaultTemperature: 0.85,
+    prompt: `【战略棋风偏好：天马行空 / 灵动奇谋】
+你下棋追求宏观视野与出其不意，极度厌倦千篇一律的机械套路。
+1. 拓宽视野：绝不盲目死缠在刚落子周围一两格狭小局部。在没有即刻生死威胁时，敢于在外围开阔星位布下疑兵，或者利用跳步、大局联络构筑立体攻防。
+2. 灵动多变：你喜欢富有想象力与战略弹性的走法，打破常规思维定式，让对手捉摸不透。
+3. 危机清醒：若己方出现连五必胜手，或对手出现冲四/活四致命威胁，必须果断出击或精确封堵！`
+  },
+  aggressive: {
+    name: '狂暴猛攻',
+    tag: '⚔️ 侵略如火',
+    desc: '极具攻击性，步步紧逼。主动做活二、冲活三、强行做杀，逼迫对手步步受制。',
+    defaultTemperature: 0.7,
+    prompt: `【战略棋风偏好：狂暴猛攻 / 侵略如火】
+你是一位进攻欲望极强的攻击型棋手。
+1. 以攻代守：优先寻找能建立连续攻势的点（如主动做活二、跳活三、构建四三杀点），逼迫对手只能被动防守。
+2. 争夺先手：敢于对攻抢先手，把控棋局主动权。
+3. 发现杀招时绝不留情，一气呵成连续冲杀锁定胜局。`
+  },
+  defensive: {
+    name: '太极坚壁',
+    tag: '🛡️ 不动如山',
+    desc: '深谋远虑，防守反击。最爱封堵对手眼位、抢占战略关隘、破除潜在杀线，等对手力竭时一击致命。',
+    defaultTemperature: 0.5,
+    prompt: `【战略棋风偏好：太极坚壁 / 不动如山】
+你是一位稳若泰山、善于防守反击的防守大师。
+1. 坚壁清野：重点审视对手的棋子走向，敏锐识别其活二、眠三等潜在杀招，提前卡死对手的延展路线与战略要冲。
+2. 蓄力待发：落子厚重沉稳，兼顾自身防守与长远阵型蓄力。
+3. 待对手攻势耗尽露出破绽，顺势反戈一击，一招制敌。`
+  },
+  balanced: {
+    name: '经典稳健',
+    tag: '⚖️ 经典大师',
+    desc: '攻守兼备，讲求子力效率与中庸之道，严谨权衡局面。',
+    defaultTemperature: 0.6,
+    prompt: `【战略棋风偏好：经典稳健 / 攻守兼备】
+你遵循正统连珠棋理，讲求效率与中正平和。
+1. 攻守平衡，根据盘面动态调整策略，当攻则攻，当防则防。
+2. 注重棋子的高效连接与空间控制，步步为营。`
+  }
+};
+
 /**
  * 格式化棋盘最近走法记录为可读文本
  */
@@ -86,38 +132,277 @@ function formatMoveHistory(history) {
 }
 
 /**
- * 构建大模型提示词
+ * 为大模型生成战术分类候选点（彻底隐藏数值评分，提供战术语义与战略选项）
+ * @param {number[][]} board 15x15 盘面
+ * @param {number} myColor 当前执棋方 (1:黑, 2:白)
+ * @param {boolean} checkBlackForbidden 是否启用黑棋禁手规则
+ * @param {string} playstyle 棋风偏好 ('openmind' | 'aggressive' | 'defensive' | 'balanced')
+ * @returns {{ urgent: Array, attack: Array, defense: Array, flank: Array, fallback: Object, summaryText: string }}
  */
-function buildPrompt(board, myColor, history, candidates, personaKey = 'humorous') {
-  const colorName = myColor === 1 ? '黑棋 (先手)' : '白棋 (后手)';
-  const persona = AI_PERSONAS[personaKey] || AI_PERSONAS.humorous;
+export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = true, playstyle = 'openmind') {
+  const opponentColor = myColor === BLACK ? WHITE : BLACK;
+  const stoneCount = countStones(board);
 
-  const candidateListStr = candidates
-    .slice(0, 5)
-    .map(c => `${c.notation} (综合威胁评分: ${Math.round(c.score)})`)
-    .join(', ');
+  // 1. 如果棋盘完全为空（黑棋第 1 手开局，打破死板的天元锁定）
+  if (stoneCount === 0) {
+    const openings = [
+      { coord: 'H8', r: 7, c: 7, desc: '天元中宫，传统正统定式，中心控盘力强' },
+      { coord: 'H9', r: 6, c: 7, desc: '直指起势，向上纵向蓄力，直指开局之起点' },
+      { coord: 'G7', r: 8, c: 6, desc: '斜指起步，对角纵深展开，斜指开局之起点' },
+      { coord: 'I8', r: 7, c: 8, desc: '横向直指，向右翼舒展' },
+      { coord: 'G9', r: 6, c: 6, desc: '星角奇兵，突破传统中宫定式' },
+      { coord: 'D4', r: 11, c: 3, desc: '外围星位，天马行空布子' }
+    ];
+    return {
+      urgent: [],
+      attack: openings.slice(0, 3),
+      defense: [],
+      flank: openings.slice(3),
+      fallback: openings[0],
+      summaryText: openings.map(o => `  • [${o.coord}]：${o.desc}`).join('\n')
+    };
+  }
+
+  // 2. 如果棋盘只有 1 颗子（白棋第 2 手应对）
+  if (stoneCount === 1) {
+    let firstR = 7, firstC = 7;
+    for (let r = 0; r < 15; r++) {
+      for (let c = 0; c < 15; c++) {
+        if (board[r][c] !== EMPTY) { firstR = r; firstC = c; break; }
+      }
+    }
+    const responses = [
+      { r: firstR - 1, c: firstC, desc: '正向直堵，抢占上方要道，遏制对手纵向连线' },
+      { r: firstR + 1, c: firstC - 1, desc: '斜向贴防，破坏对手对角延展（斜指定式）' },
+      { r: firstR, c: firstC + 1, desc: '横向侧翼阻截，建立右侧屏障' },
+      { r: firstR, c: firstC - 1, desc: '左翼贴靠防守，争夺中腹控制权' },
+      { r: firstR - 2, c: firstC, desc: '跳一步大局牵制，留出腾挪空间' },
+      { r: firstR - 1, c: firstC - 1, desc: '斜向小飞，构筑自身外围势力' },
+      { r: firstR + 2, c: firstC + 2, desc: '天马行空外势，避其锋芒，开辟新战场' }
+    ].filter(item => inBoard(item.r, item.c) && board[item.r][item.c] === EMPTY)
+     .map(item => ({ ...item, coord: coordToNotation(item.r, item.c) }));
+
+    return {
+      urgent: [],
+      attack: responses.slice(0, 2),
+      defense: responses.slice(2, 4),
+      flank: responses.slice(4),
+      fallback: responses[0] || { r: 7, c: 7, coord: 'H8' },
+      summaryText: responses.map(o => `  • [${o.coord}]：${o.desc}`).join('\n')
+    };
+  }
+
+  // 3. 正常盘面评估：扫描所有距离棋子 <= 2~3 格的空位
+  const evaluatedPoints = [];
+  const nearby = Array.from({ length: 15 }, () => Array(15).fill(0));
+
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (board[r][c] !== EMPTY) {
+        for (let dr = -3; dr <= 3; dr++) {
+          for (let dc = -3; dc <= 3; dc++) {
+            const nr = r + dr, nc = c + dc;
+            if (inBoard(nr, nc) && board[nr][nc] === EMPTY) {
+              const dist = Math.max(Math.abs(dr), Math.abs(dc));
+              if (dist <= 2) {
+                nearby[nr][nc] = Math.max(nearby[nr][nc], 2);
+              } else if (dist === 3 && nearby[nr][nc] === 0) {
+                nearby[nr][nc] = 1;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (let r = 0; r < 15; r++) {
+    for (let c = 0; c < 15; c++) {
+      if (nearby[r][c] > 0 && board[r][c] === EMPTY) {
+        if (myColor === BLACK && checkBlackForbidden) {
+          const forbidden = checkForbidden(board, r, c);
+          if (forbidden.isForbidden) continue;
+        }
+
+        board[r][c] = myColor;
+        let attackScore = 0;
+        for (const [dr, dc] of DIRECTIONS) {
+          attackScore += evaluateDirection(board, r, c, dr, dc, myColor);
+        }
+        const myShapes = describePoint(board, r, c, myColor);
+        board[r][c] = EMPTY;
+
+        board[r][c] = opponentColor;
+        let defenseScore = 0;
+        for (const [dr, dc] of DIRECTIONS) {
+          defenseScore += evaluateDirection(board, r, c, dr, dc, opponentColor);
+        }
+        const oppShapes = describePoint(board, r, c, opponentColor);
+        board[r][c] = EMPTY;
+
+        const distCenter = Math.abs(r - 7) + Math.abs(c - 7);
+        const positionScore = 14 - distCenter;
+        const totalScore = attackScore * 1.1 + defenseScore * 1.0 + positionScore;
+
+        evaluatedPoints.push({
+          r,
+          c,
+          coord: coordToNotation(r, c),
+          isCore: nearby[r][c] === 2,
+          attackScore,
+          defenseScore,
+          totalScore,
+          myShapes,
+          oppShapes
+        });
+      }
+    }
+  }
+
+  if (evaluatedPoints.length === 0) {
+    const def = { r: 7, c: 7, coord: 'H8', totalScore: 0 };
+    return { urgent: [], attack: [], defense: [], flank: [], fallback: def, summaryText: '  • [H8]：中宫落子' };
+  }
+
+  // 紧急情况处理（连五绝杀 或 封堵致命冲四/活四）
+  const urgent = [];
+  for (const pt of evaluatedPoints) {
+    if (pt.attackScore >= SCORES.WIN) {
+      urgent.push({ ...pt, desc: '🚨 己方连五绝杀！落子此点即刻锁定胜局！' });
+    } else if (pt.defenseScore >= SCORES.WIN) {
+      urgent.push({ ...pt, desc: '🚨 敌方即将连五获胜！必须在此封堵阻击！' });
+    } else if (pt.attackScore >= SCORES.LIVE_FOUR) {
+      urgent.push({ ...pt, desc: '⚡ 己方成活四！两头通绝杀，必胜之机！' });
+    } else if (pt.defenseScore >= SCORES.LIVE_FOUR) {
+      urgent.push({ ...pt, desc: '⚠️ 敌方活四成型在即！必须紧急堵截！' });
+    }
+  }
+
+  // 进攻候选池
+  const attackList = evaluatedPoints
+    .filter(p => p.attackScore > 0 && !urgent.some(u => u.coord === p.coord))
+    .sort((a, b) => b.attackScore - a.attackScore)
+    .slice(0, 4)
+    .map(p => {
+      const shapeStr = p.myShapes.slice(0, 2).join('、') || '展开连子攻势';
+      return {
+        ...p,
+        desc: `进攻突破，形成【${shapeStr}】，主动施压寻求做杀`
+      };
+    });
+
+  // 防守候选池
+  const defenseList = evaluatedPoints
+    .filter(p => p.defenseScore > 0 && !urgent.some(u => u.coord === p.coord) && !attackList.some(a => a.coord === p.coord))
+    .sort((a, b) => b.defenseScore - a.defenseScore)
+    .slice(0, 4)
+    .map(p => {
+      const oppShapeStr = p.oppShapes.slice(0, 2).join('、') || '潜在连线';
+      return {
+        ...p,
+        desc: `关键防守，封阻敌方【${oppShapeStr}】，抢占要冲化解危机`
+      };
+    });
+
+  // 外势与大局策应池（偏外围、具有广阔施展空间的点）
+  const flankList = evaluatedPoints
+    .filter(p => !urgent.some(u => u.coord === p.coord) && !attackList.some(a => a.coord === p.coord) && !defenseList.some(d => d.coord === p.coord))
+    .sort((a, b) => b.totalScore - a.totalScore)
+    .slice(0, 3)
+    .map(p => ({
+      ...p,
+      desc: '大局外势，避开狭小缠斗，在开阔区域开辟新战线、遥相呼应'
+    }));
+
+  const sortedOverall = [...evaluatedPoints].sort((a, b) => b.totalScore - a.totalScore);
+  const fallback = urgent[0] || sortedOverall[0];
+
+  const sections = [];
+  if (urgent.length > 0) {
+    sections.push('【🚨 紧急胜负手（生死攸关，强烈建议优先处理）】：\n' + urgent.map(u => `  • [${u.coord}]：${u.desc}`).join('\n'));
+  }
+  if (attackList.length > 0) {
+    sections.push('【⚔️ 攻势推进选项（以攻代守，主动造势）】：\n' + attackList.map(a => `  • [${a.coord}]：${a.desc}`).join('\n'));
+  }
+  if (defenseList.length > 0) {
+    sections.push('【🛡️ 稳健防守选项（坚壁清野，遏制敌方）】：\n' + defenseList.map(d => `  • [${d.coord}]：${d.desc}`).join('\n'));
+  }
+  if (flankList.length > 0) {
+    sections.push('【🌌 大局外势 / 奇兵策应（打破僵局，开辟天地）】：\n' + flankList.map(f => `  • [${f.coord}]：${f.desc}`).join('\n'));
+  }
+
+  return {
+    urgent,
+    attack: attackList,
+    defense: defenseList,
+    flank: flankList,
+    fallback,
+    summaryText: sections.join('\n\n')
+  };
+}
+
+/**
+ * 构建大模型提示词（融入 ASCII 棋盘大局视觉、战术语义选项与个性化棋风）
+ * @param {number[][]} board 棋盘状态
+ * @param {number} myColor AI 棋子颜色 (1:黑, 2:白)
+ * @param {Array} history 落子历史
+ * @param {Array} [rawCandidates] 兜底候选点
+ * @param {Object|string} [configOrPersona] 配置对象或人设 key
+ */
+export function buildPrompt(board, myColor, history, rawCandidates = [], configOrPersona = 'humorous') {
+  const colorName = myColor === 1 ? '黑棋 (先手)' : '白棋 (后手)';
+
+  let personaKey = 'humorous';
+  let playstyleKey = 'openmind';
+  let checkBlackForbidden = true;
+
+  if (typeof configOrPersona === 'string') {
+    personaKey = configOrPersona;
+  } else if (configOrPersona && typeof configOrPersona === 'object') {
+    personaKey = configOrPersona.persona || 'humorous';
+    playstyleKey = configOrPersona.playstyle || 'openmind';
+    if (typeof configOrPersona.checkBlackForbidden === 'boolean') {
+      checkBlackForbidden = configOrPersona.checkBlackForbidden;
+    }
+  }
+
+  const persona = AI_PERSONAS[personaKey] || AI_PERSONAS.humorous;
+  const playstyle = AI_PLAYSTYLES[playstyleKey] || AI_PLAYSTYLES.openmind;
+
+  const tactical = categorizeTacticalMoves(board, myColor, checkBlackForbidden, playstyleKey);
+  const lastMove = history && history.length > 0 ? history[history.length - 1] : null;
+  const boardAscii = renderBoardAscii(board, lastMove);
 
   const systemPrompt = `${persona.prompt}
-你正在与人类棋手在一张 15x15 的五子棋盘上对弈。
+
+${playstyle.prompt}
+
+【对弈背景】
+你正在与人类棋手在一张 15x15 的标准五子棋盘上对弈。
 你执【${colorName}】。
-棋盘坐标说明：横轴 A 到 O (列0到14)，纵轴 1 到 15 (行14到0)。中心天元为 H8。
-游戏规则：连成五子即获胜；若执黑先手，则有三三禁手限制。
+棋盘坐标规范：横轴 A 到 O (列0到14)，纵轴 1 到 15 (行14到0)。中心天元为 H8。
+规则约束：五子连珠即获胜；若你执黑棋先手，严禁下出三三、四四或长连禁手点，否则判负；若执白棋则无任何禁手限制。
 
-重要决策要求：
-由于纯语言模型对棋盘空间坐标感知有限，本地战术引擎已经为你预先计算了当前最合规且最具威胁的几个候选落子点：
-【${candidateListStr}】。
-请你仔细权衡，并从中选出一个你认为最佳的坐标（例如 "H8" 或 "G9" 等）。
-同时输出一句符合你人设口吻的下棋对话（20~50字以内）。
+【当前 15x15 棋盘全局实况（●=黑棋，○=白棋，.=空位，★/☆=最近一手落子）】
+${boardAscii}
 
+【落子决策要求】
+1. 观察上方 15x15 真实盘面，理解整体黑白势力分布与空旷区域。
+2. 结合你的【战略棋风偏好】权衡决策。除参考系统推演选项外，只要是盘面上未被占用的空位合法坐标，你都可以根据宏观大局自由决定！
+3. 请同时输出一句符合你人设口吻的生动对弈交流（20~50字以内）。
+
+【输出格式约束】
 你必须且仅能以严格的 JSON 格式回复，不要携带任何 Markdown 代码块标记（如 \`\`\`json），格式如下：
-{"coord": "H8", "comment": "落子对话内容"}`;
+{"coord": "H8", "comment": "你的对弈发言"}`;
 
-  const userPrompt = `当前对局局势：
+  const userPrompt = `当前对局态势：
 - 最近步数回顾：${formatMoveHistory(history)}
-- 推荐候选落子点：${candidateListStr}
-请综合选择你的落子点，并说一句话。请只输出 JSON 对象：`;
 
-  return { systemPrompt, userPrompt };
+${tactical.summaryText}
+
+请综合评估全局局势，挑选你决定落子的坐标，并说一句符合你性格的对话。请只输出 JSON 对象：`;
+
+  return { systemPrompt, userPrompt, tactical };
 }
 
 /**
@@ -211,8 +496,18 @@ export async function consumeChatStream(response, handlers = {}) {
  *                     timedOut?: boolean, cancelled?: boolean, elapsedMs: number, reasoning?: string }>}
  */
 export async function getLLMMove(config, board, myColor, history, candidates, options = {}) {
-  const fallbackMove = candidates[0] || { r: 7, c: 7, notation: 'H8' };
   const startedAt = Date.now();
+
+  const promptPack = buildPrompt(board, myColor, history, candidates, {
+    persona: config.persona,
+    playstyle: config.playstyle || 'openmind',
+    checkBlackForbidden: myColor === BLACK
+  });
+  const { systemPrompt, userPrompt, tactical } = promptPack;
+
+  const fallbackMove = (tactical && tactical.fallback)
+    ? { r: tactical.fallback.r, c: tactical.fallback.c, notation: tactical.fallback.coord }
+    : (candidates[0] || { r: 7, c: 7, notation: 'H8' });
 
   if (!config.apiKey || config.apiKey.trim() === '') {
     return {
@@ -222,8 +517,6 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
       elapsedMs: 0
     };
   }
-
-  const { systemPrompt, userPrompt } = buildPrompt(board, myColor, history, candidates, config.persona);
 
   let cleanBaseUrl = (config.baseUrl || '').trim().replace(/\/+$/, '');
   if (!cleanBaseUrl) {
@@ -280,7 +573,11 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
       stream: true
     };
     if (!isReasoningModel) {
-      requestBody.temperature = 0.7;
+      const playstyle = AI_PLAYSTYLES[config.playstyle] || AI_PLAYSTYLES.openmind;
+      const reqTemp = typeof config.temperature === 'number'
+        ? config.temperature
+        : playstyle.defaultTemperature;
+      requestBody.temperature = Math.max(0.1, Math.min(1.2, reqTemp));
     }
 
     const response = await fetch(endpoint, {
@@ -357,6 +654,50 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
       const coord = notationToCoord(parsed.coord);
       // 验证坐标有效性及是否已有棋子
       if (coord && inBoard(coord[0], coord[1]) && board[coord[0]][coord[1]] === EMPTY) {
+        // 1. 禁手防自杀保护：执黑时若误选禁手点，智能校准为合规好手
+        if (myColor === BLACK) {
+          const forbidden = checkForbidden(board, coord[0], coord[1]);
+          if (forbidden.isForbidden) {
+            return {
+              ...fallbackMove,
+              comment: (parsed.comment ? `${parsed.comment} ` : '') + '（原选点为禁手点，智能校准为合规手）',
+              isFallback: false,
+              elapsedMs,
+              reasoning
+            };
+          }
+        }
+
+        // 2. 绝杀与生死拦截安全兜底 (Safety Guard)
+        // A. 己方直接连五绝杀：若 LLM 错失杀机，自动完成致命一击！
+        const winMove = tactical?.urgent?.find(u => u.attackScore >= SCORES.WIN);
+        if (winMove && (coord[0] !== winMove.r || coord[1] !== winMove.c)) {
+          return {
+            r: winMove.r,
+            c: winMove.c,
+            notation: winMove.coord,
+            comment: parsed.comment || '五子连珠，锁定胜局！',
+            isFallback: false,
+            elapsedMs,
+            reasoning
+          };
+        }
+
+        // B. 敌方即将连五绝杀：若 LLM 未堵截该致命威胁，紧急封死！
+        const blockWinMoves = (tactical?.urgent || []).filter(u => u.defenseScore >= SCORES.WIN);
+        if (blockWinMoves.length > 0 && !blockWinMoves.some(b => b.r === coord[0] && b.c === coord[1])) {
+          const emergencyBlock = blockWinMoves[0];
+          return {
+            r: emergencyBlock.r,
+            c: emergencyBlock.c,
+            notation: emergencyBlock.coord,
+            comment: parsed.comment ? `${parsed.comment}（险！绝杀在即，紧急封死！）` : '险！绝杀在即，紧急封死！',
+            isFallback: false,
+            elapsedMs,
+            reasoning
+          };
+        }
+
         return {
           r: coord[0],
           c: coord[1],
@@ -610,7 +951,7 @@ export async function testLLMConnection(config, options = {}) {
   meta.usedCurrentBoard = useCurrentBoard;
 
   const candidates = getCandidateMoves(probeBoard, BLACK, 5, false);
-  const { systemPrompt, userPrompt } = buildPrompt(probeBoard, BLACK, [], candidates, config.persona);
+  const { systemPrompt, userPrompt } = buildPrompt(probeBoard, BLACK, [], candidates, config);
 
   lines.push({
     level: 'ok',

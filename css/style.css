@@ -623,9 +623,31 @@ body.in-game .stats-banner {
   font-weight: 600;
 }
 
+.ai-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
 .ai-tag {
   font-size: 0.75rem;
   color: var(--text-dim);
+}
+
+.ai-playstyle-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(224, 168, 64, 0.15);
+  color: var(--accent-gold);
+  border: 1px solid rgba(224, 168, 64, 0.35);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* 对话气泡 */
