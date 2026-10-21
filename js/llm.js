@@ -451,8 +451,46 @@ ${tactical.summaryText}
 }
 
 /**
- * 消费 OpenAI 兼容的 SSE 流式响应
- * 逐块解析 delta.reasoning_content（推理型模型的思考链）与 delta.content（最终答案）
+ * 从非流式响应中鲁棒提取 content 与 reasoning（兼容 OpenAI / Anthropic / 各种代理网关）
+ */
+function extractFromNonStream(data) {
+  if (!data || typeof data !== 'object') return { content: '', reasoning: '' };
+
+  const choice = (data.choices && data.choices[0]) || {};
+  const msg = choice.message || choice.delta || choice;
+  let content =
+    (typeof msg.content === 'string' && msg.content) ||
+    (typeof msg.text === 'string' && msg.text) ||
+    (typeof choice.text === 'string' && choice.text) ||
+    (typeof data.response === 'string' && data.response) ||
+    (typeof data.text === 'string' && data.text) ||
+    '';
+
+  let reasoning =
+    (typeof msg.reasoning_content === 'string' && msg.reasoning_content) ||
+    (typeof msg.reasoning === 'string' && msg.reasoning) ||
+    (typeof msg.thinking === 'string' && msg.thinking) ||
+    (typeof msg.thought === 'string' && msg.thought) ||
+    '';
+
+  // Anthropic native messages: data.content = [{ type: 'text', text: '...' }]
+  if (Array.isArray(data.content)) {
+    for (const block of data.content) {
+      if (block.type === 'text' && typeof block.text === 'string') content += block.text;
+      if (block.type === 'thinking' && typeof block.thinking === 'string') reasoning += block.thinking;
+    }
+  }
+
+  if (!content.trim() && reasoning.trim()) {
+    content = reasoning;
+  }
+
+  return { content, reasoning };
+}
+
+/**
+ * 消费 OpenAI 兼容及各类代理的 SSE 流式响应
+ * 鲁棒提取 content（兼容 content / text / response 等）与 reasoning（思考链 / thinking）
  * @param {Response} response fetch 返回的流式响应
  * @param {{ onIdle?: Function, onDelta?: Function }} handlers
  *   onIdle() 每收到一个数据块调用一次（用于重置空闲超时）
@@ -493,16 +531,32 @@ export async function consumeChatStream(response, handlers = {}) {
           continue; // 心跳包或半截数据，直接跳过
         }
 
-        const delta = json.choices && json.choices[0] && json.choices[0].delta;
-        if (!delta) continue;
+        const choice = (json.choices && json.choices[0]) || {};
+        const delta = choice.delta || choice.message || json.delta || json.message || choice || json;
+
+        const chunkContent =
+          (typeof delta.content === 'string' && delta.content) ||
+          (typeof delta.text === 'string' && delta.text) ||
+          (typeof choice.text === 'string' && choice.text) ||
+          (typeof json.response === 'string' && json.response) ||
+          (typeof json.text === 'string' && json.text) ||
+          (typeof json.content === 'string' && json.content) ||
+          '';
+
+        const chunkReasoning =
+          (typeof delta.reasoning_content === 'string' && delta.reasoning_content) ||
+          (typeof delta.reasoning === 'string' && delta.reasoning) ||
+          (typeof delta.thinking === 'string' && delta.thinking) ||
+          (typeof delta.thought === 'string' && delta.thought) ||
+          '';
 
         let changed = false;
-        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-          reasoning += delta.reasoning_content;
+        if (chunkReasoning) {
+          reasoning += chunkReasoning;
           changed = true;
         }
-        if (typeof delta.content === 'string' && delta.content) {
-          content += delta.content;
+        if (chunkContent) {
+          content += chunkContent;
           changed = true;
         }
 
@@ -518,6 +572,18 @@ export async function consumeChatStream(response, handlers = {}) {
       if (cancelled) break;
     }
   } finally {
+    if (cancelled) {
+      try { await reader.cancel(); } catch (e) { /* 流已关闭，忽略 */ }
+    }
+  }
+
+  // 关键兜底：如果 content 为空但 reasoning 有文本（例如纯思考型输出或 Claude thinking），以 reasoning 兜底
+  if (!content.trim() && reasoning.trim()) {
+    content = reasoning;
+  }
+
+  return { content, reasoning, cancelled };
+}
     if (cancelled) {
       try { await reader.cancel(); } catch (e) { /* 流已关闭，忽略 */ }
     }
@@ -668,9 +734,9 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
     } else {
       // 兜底：服务端忽略了 stream 参数，按一次性 JSON 响应处理
       const data = await response.json();
-      const message = data.choices?.[0]?.message || {};
-      content = message.content || '';
-      reasoning = message.reasoning_content || '';
+      const extracted = extractFromNonStream(data);
+      content = extracted.content;
+      reasoning = extracted.reasoning;
       emit({
         phase: 'answer',
         text: content,
@@ -1139,9 +1205,9 @@ export async function testLLMConnection(config, options = {}) {
       reasoning = streamed.reasoning;
     } else {
       const data = await response.json();
-      const message = data.choices?.[0]?.message || {};
-      content = message.content || '';
-      reasoning = message.reasoning_content || '';
+      const extracted = extractFromNonStream(data);
+      content = extracted.content;
+      reasoning = extracted.reasoning;
       firstByteMs = Date.now() - probeStart;
     }
 
