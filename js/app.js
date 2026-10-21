@@ -1349,7 +1349,9 @@ class GomokuApp {
         chosenMove = { r: llmResult.r, c: llmResult.c, notation: llmResult.notation };
         aiComment = llmResult.comment;
 
-        if (llmResult.timedOut) {
+        if (llmResult.isFallback && !llmResult.cancelled) {
+          this.showToast(`⚠️ 大模型未正常应答：${llmResult.comment}`);
+        } else if (llmResult.timedOut) {
           const waited = Math.round((llmResult.elapsedMs || 0) / 1000);
           this.showToast(`⏱️ 大模型 ${waited} 秒无响应，已改由本地引擎代下这一手`);
         }
