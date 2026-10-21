@@ -12,7 +12,7 @@ import {
   analyzePosition,
   formatAnalysisForLLM
 } from './analysis.js';
-import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS, AI_PLAYSTYLES } from './llm.js?v=2026.10.21-openmind-v3';
+import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS, AI_PLAYSTYLES } from './llm.js?v=2026.10.21-openmind-v5';
 import { searchPro, boardToFlat } from './engine-pro.js';
 import {
   generateSyncCode,
@@ -27,9 +27,9 @@ import {
   pullSettings,
   deleteSettings,
   mergeSettings
-} from './sync.js?v=2026.10.21-openmind-v3';
+} from './sync.js?v=2026.10.21-openmind-v5';
 import { sound } from './audio.js';
-import { StorageManager } from './storage.js?v=2026.10.21-openmind-v3';
+import { StorageManager } from './storage.js?v=2026.10.21-openmind-v5';
 import { Goban } from './board.js';
 import { api } from './api.js';
 

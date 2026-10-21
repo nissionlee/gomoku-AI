@@ -444,7 +444,8 @@ ${boardAscii}
 
 ${tactical.summaryText}
 
-请综合评估全局局势，挑选你决定落子的坐标，并说一句符合你性格的对话。请只输出 JSON 对象：`;
+请综合评估全局局势，挑选你决定落子的坐标，并说一句符合你性格的对话。请必须且仅输出严格的 JSON 对象（不要写任何解释、不要写前置废话）：
+{"coord": "落子坐标", "comment": "对弈发言"}`;
 
   return { systemPrompt, userPrompt, tactical };
 }
@@ -800,25 +801,78 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
 }
 
 /**
- * 从模型输出中解析落子 JSON（容忍 markdown 包裹与格式瑕疵）
+ * 超强容错落子解析器：支持严格 JSON、单引号 JSON、含前导/后置文字、键名变体(move/position)及自然语言提取
+ * @param {string} content 模型原始响应文本
  * @returns {{coord?: string, comment?: string}|null}
  */
-function parseMoveJson(content) {
-  if (!content) return null;
-  try {
-    const jsonStr = content.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(jsonStr);
-    if (parsed && parsed.coord) return parsed;
-  } catch (e) {
-    /* 落到下面的正则兜底 */
+export function parseMoveJson(content) {
+  if (!content || typeof content !== 'string') return null;
+
+  const raw = content.trim();
+
+  // 1. 尝试直接解析 JSON 或提取最外层 {...}
+  const jsonBlockMatches = raw.match(/\{[\s\S]*?\}/g);
+  if (jsonBlockMatches) {
+    for (const block of jsonBlockMatches) {
+      try {
+        const cleaned = block.replace(/,\s*\}/g, '}').replace(/,\s*\]/g, ']');
+        const obj = JSON.parse(cleaned);
+        const c = obj.coord || obj.coordinate || obj.move || obj.position || obj.point || obj.location || obj.pos || obj.target || obj.cell;
+        if (c && typeof c === 'string') {
+          const match = c.trim().match(/^([A-O](?:[1-9]|1[0-5]))$/i);
+          if (match) {
+            const comment = obj.comment || obj.thought || obj.message || obj.say || obj.reason || obj.desc || obj.text || '';
+            return { coord: match[1].toUpperCase(), comment: String(comment).trim() };
+          }
+        }
+      } catch (e) {
+        // 单引号替换修复
+        try {
+          const singleFixed = block.replace(/'/g, '"').replace(/,\s*\}/g, '}');
+          const obj = JSON.parse(singleFixed);
+          const c = obj.coord || obj.coordinate || obj.move || obj.position || obj.point;
+          if (c && typeof c === 'string') {
+            const match = c.trim().match(/^([A-O](?:[1-9]|1[0-5]))$/i);
+            if (match) {
+              const comment = obj.comment || obj.thought || obj.message || '';
+              return { coord: match[1].toUpperCase(), comment: String(comment).trim() };
+            }
+          }
+        } catch (e2) {}
+      }
+    }
   }
-  const coordMatch = content.match(/"coord"\s*:\s*"([A-O](?:[1-9]|1[0-5]))"/i);
-  if (!coordMatch) return null;
-  const commentMatch = content.match(/"comment"\s*:\s*"([^"]+)"/i);
-  return {
-    coord: coordMatch[1].toUpperCase(),
-    comment: commentMatch ? commentMatch[1] : ''
-  };
+
+  // 2. 正则宽容提取键值对: coord/move/position = H8
+  const kvMatch = raw.match(/(?:coord|coordinate|move|position|point|location|pos|target)\s*["']?\s*[:=]\s*["']?\s*([A-O](?:[1-9]|1[0-5]))\b/i);
+  if (kvMatch) {
+    const commentMatch = raw.match(/(?:comment|thought|message|say|reason|desc)\s*["']?\s*[:=]\s*["']?([^"'\r\n]+)/i);
+    return {
+      coord: kvMatch[1].toUpperCase(),
+      comment: commentMatch ? commentMatch[1].trim() : ''
+    };
+  }
+
+  // 3. 自然语言提取：如「我选择在 H8 落子」、「落子坐标为 [G7]」、「I choose H8」
+  const nlMatch = raw.match(/(?:落子|走|下在|选择|坐标|位置|走子|move|play|coord|at|place)\s*(?:为|在|是|：|:)?\s*\[?\s*([A-O](?:[1-9]|1[0-5]))\b/i);
+  if (nlMatch) {
+    const cleanedText = raw.replace(nlMatch[0], '').replace(/[\[\]{}"]/g, '').trim().slice(0, 60);
+    return {
+      coord: nlMatch[1].toUpperCase(),
+      comment: cleanedText || '看我这一手！'
+    };
+  }
+
+  // 4. 全文兜底扫描合法五子棋坐标 (如 [H8]、**H8**、H8)
+  const anyCoordMatch = raw.match(/(?:\[|\*\*|【)?([A-O](?:[1-9]|1[0-5]))(?:\b|\]|\*\*|】)/i);
+  if (anyCoordMatch) {
+    return {
+      coord: anyCoordMatch[1].toUpperCase(),
+      comment: raw.replace(anyCoordMatch[0], '').trim().slice(0, 60) || '落子无悔，请！'
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -1133,12 +1187,13 @@ export async function testLLMConnection(config, options = {}) {
     const coord = notationToCoord(parsed.coord);
     if (coord && inBoard(coord[0], coord[1])) {
       meta.coord = parsed.coord.toUpperCase();
-      lines.push({ level: 'ok', text: `返回格式合法，落子建议 ${meta.coord}` });
+      lines.push({ level: 'ok', text: `返回格式合法，落子建议 ${meta.coord}${parsed.comment ? `（"${parsed.comment}"）` : ''}` });
     } else {
       lines.push({ level: 'warn', text: `模型返回坐标 ${parsed.coord} 越界，对弈时会自动校准为本地候选点` });
     }
   } else {
-    lines.push({ level: 'warn', text: '模型未按要求返回 JSON 坐标，对弈时将改由本地引擎候选点兜底' });
+    const snippet = content ? content.trim().replace(/\s+/g, ' ').slice(0, 35) : '空';
+    lines.push({ level: 'warn', text: `模型未按要求返回 JSON 坐标（原始输出："${snippet}..."），对弈时将改由本地引擎候选点兜底` });
   }
 
   const verdict = buildVerdict(meta);
