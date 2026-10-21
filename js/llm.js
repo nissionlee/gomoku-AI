@@ -584,13 +584,6 @@ export async function consumeChatStream(response, handlers = {}) {
 
   return { content, reasoning, cancelled };
 }
-    if (cancelled) {
-      try { await reader.cancel(); } catch (e) { /* 流已关闭，忽略 */ }
-    }
-  }
-
-  return { content, reasoning, cancelled };
-}
 
 /**
  * 调用大模型 API 进行对弈落子（流式 + 双超时）
