@@ -132,6 +132,18 @@ function formatMoveHistory(history) {
 }
 
 /**
+ * 数组洗牌工具函数（打乱推荐顺序，消除大模型自上而下选第一项的认知偏差）
+ */
+function shuffle(array) {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
  * 为大模型生成战术分类候选点（彻底隐藏数值评分，提供战术语义与战略选项）
  * @param {number[][]} board 15x15 盘面
  * @param {number} myColor 当前执棋方 (1:黑, 2:白)
@@ -145,7 +157,7 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
 
   // 1. 如果棋盘完全为空（黑棋第 1 手开局，打破死板的天元锁定）
   if (stoneCount === 0) {
-    const openings = [
+    let openings = [
       { coord: 'H8', r: 7, c: 7, desc: '天元中宫，传统正统定式，中心控盘力强' },
       { coord: 'H9', r: 6, c: 7, desc: '直指起势，向上纵向蓄力，直指开局之起点' },
       { coord: 'G7', r: 8, c: 6, desc: '斜指起步，对角纵深展开，斜指开局之起点' },
@@ -153,6 +165,9 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
       { coord: 'G9', r: 6, c: 6, desc: '星角奇兵，突破传统中宫定式' },
       { coord: 'D4', r: 11, c: 3, desc: '外围星位，天马行空布子' }
     ];
+    if (playstyle === 'openmind') {
+      openings = shuffle(openings);
+    }
     return {
       urgent: [],
       attack: openings.slice(0, 3),
@@ -171,7 +186,7 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
         if (board[r][c] !== EMPTY) { firstR = r; firstC = c; break; }
       }
     }
-    const responses = [
+    let responses = [
       { r: firstR - 1, c: firstC, desc: '正向直堵，抢占上方要道，遏制对手纵向连线' },
       { r: firstR + 1, c: firstC - 1, desc: '斜向贴防，破坏对手对角延展（斜指定式）' },
       { r: firstR, c: firstC + 1, desc: '横向侧翼阻截，建立右侧屏障' },
@@ -181,6 +196,10 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
       { r: firstR + 2, c: firstC + 2, desc: '天马行空外势，避其锋芒，开辟新战场' }
     ].filter(item => inBoard(item.r, item.c) && board[item.r][item.c] === EMPTY)
      .map(item => ({ ...item, coord: coordToNotation(item.r, item.c) }));
+
+    if (playstyle === 'openmind') {
+      responses = shuffle(responses);
+    }
 
     return {
       urgent: [],
@@ -321,14 +340,39 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
   if (urgent.length > 0) {
     sections.push('【🚨 紧急胜负手（生死攸关，强烈建议优先处理）】：\n' + urgent.map(u => `  • [${u.coord}]：${u.desc}`).join('\n'));
   }
-  if (attackList.length > 0) {
-    sections.push('【⚔️ 攻势推进选项（以攻代守，主动造势）】：\n' + attackList.map(a => `  • [${a.coord}]：${a.desc}`).join('\n'));
+
+  let finalAttack = attackList;
+  let finalDefense = defenseList;
+  let finalFlank = flankList;
+
+  if (playstyle === 'openmind') {
+    finalAttack = shuffle(attackList);
+    finalDefense = shuffle(defenseList);
+    finalFlank = shuffle(flankList);
   }
-  if (defenseList.length > 0) {
-    sections.push('【🛡️ 稳健防守选项（坚壁清野，遏制敌方）】：\n' + defenseList.map(d => `  • [${d.coord}]：${d.desc}`).join('\n'));
+
+  const normalSections = [];
+  if (finalAttack.length > 0) {
+    normalSections.push('【⚔️ 攻势推进选项（以攻代守，主动造势）】：\n' + finalAttack.map(a => `  • [${a.coord}]：${a.desc}`).join('\n'));
   }
-  if (flankList.length > 0) {
-    sections.push('【🌌 大局外势 / 奇兵策应（打破僵局，开辟天地）】：\n' + flankList.map(f => `  • [${f.coord}]：${f.desc}`).join('\n'));
+  if (finalDefense.length > 0) {
+    normalSections.push('【🛡️ 稳健防守选项（坚壁清野，遏制敌方）】：\n' + finalDefense.map(d => `  • [${d.coord}]：${d.desc}`).join('\n'));
+  }
+  if (finalFlank.length > 0) {
+    normalSections.push('【🌌 大局外势 / 奇兵策应（打破僵局，开辟天地）】：\n' + finalFlank.map(f => `  • [${f.coord}]：${f.desc}`).join('\n'));
+  }
+
+  if (playstyle === 'openmind') {
+    // 随机打乱大局外势、攻势、防守的呈现顺序，彻底打破大模型自上而下选第一项的习惯偏见
+    sections.push(...shuffle(normalSections));
+  } else if (playstyle === 'defensive') {
+    // 防守流：防守栏优先
+    const defSec = normalSections.find(s => s.includes('稳健防守'));
+    const others = normalSections.filter(s => !s.includes('稳健防守'));
+    if (defSec) sections.push(defSec);
+    sections.push(...others);
+  } else {
+    sections.push(...normalSections);
   }
 
   return {
