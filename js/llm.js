@@ -451,10 +451,25 @@ ${tactical.summaryText}
 }
 
 /**
- * 从非流式响应中鲁棒提取 content 与 reasoning（兼容 OpenAI / Anthropic / 各种代理网关）
+ * 规范化 Base URL：去除末尾斜杠，并容错剔除用户不小心复制进来的 /chat/completions
+ */
+export function normalizeBaseUrl(url, defaultPreset = 'deepseek') {
+  let clean = (url || '').trim().replace(/\/+$/, '');
+  if (!clean) clean = PROVIDER_PRESETS[defaultPreset]?.baseUrl || PROVIDER_PRESETS.deepseek.baseUrl;
+  clean = clean.replace(/\/chat\/completions\/?$/, '');
+  return clean;
+}
+
+/**
+ * 从非流式响应中鲁棒提取 content 与 reasoning（兼容 OpenAI / Anthropic / Gemini / 各种代理网关）
  */
 function extractFromNonStream(data) {
-  if (!data || typeof data !== 'object') return { content: '', reasoning: '' };
+  if (!data || typeof data !== 'object') return { content: '', reasoning: '', error: null };
+
+  if (data.error) {
+    const errMsg = typeof data.error === 'string' ? data.error : (data.error.message || JSON.stringify(data.error));
+    return { content: '', reasoning: '', error: errMsg };
+  }
 
   const choice = (data.choices && data.choices[0]) || {};
   const msg = choice.message || choice.delta || choice;
@@ -481,11 +496,19 @@ function extractFromNonStream(data) {
     }
   }
 
+  // Gemini native: data.candidates[0].content.parts
+  if (data.candidates && data.candidates[0]?.content?.parts) {
+    for (const part of data.candidates[0].content.parts) {
+      if (typeof part.text === 'string') content += part.text;
+      if (typeof part.thought === 'string') reasoning += part.thought;
+    }
+  }
+
   if (!content.trim() && reasoning.trim()) {
     content = reasoning;
   }
 
-  return { content, reasoning };
+  return { content, reasoning, error: null };
 }
 
 /**
@@ -495,7 +518,7 @@ function extractFromNonStream(data) {
  * @param {{ onIdle?: Function, onDelta?: Function }} handlers
  *   onIdle() 每收到一个数据块调用一次（用于重置空闲超时）
  *   onDelta({ content, reasoning, phase }) 内容有更新时调用；返回 false 表示要求中止
- * @returns {Promise<{ content: string, reasoning: string, cancelled: boolean }>}
+ * @returns {Promise<{ content: string, reasoning: string, cancelled: boolean, error: string|null, hitLengthLimit: boolean, rawChunkCount: number, samplePayload: string }>}
  */
 export async function consumeChatStream(response, handlers = {}) {
   const { onIdle, onDelta } = handlers;
@@ -505,6 +528,100 @@ export async function consumeChatStream(response, handlers = {}) {
   let content = '';
   let reasoning = '';
   let cancelled = false;
+  let lastError = null;
+  let hitLengthLimit = false;
+  let rawChunkCount = 0;
+  let samplePayload = '';
+
+  const processPayload = (payload) => {
+    rawChunkCount++;
+    if (!samplePayload && payload.length > 0) {
+      samplePayload = payload.slice(0, 120);
+    }
+
+    let json;
+    try {
+      json = JSON.parse(payload);
+    } catch (e) {
+      return; // 心跳包或半截数据，直接跳过
+    }
+
+    if (json.error) {
+      lastError = typeof json.error === 'string' ? json.error : (json.error.message || JSON.stringify(json.error));
+      return;
+    }
+
+    const finishReason = json.choices?.[0]?.finish_reason || json.finish_reason || json.stop_reason;
+    if (finishReason === 'length' || finishReason === 'max_tokens') {
+      hitLengthLimit = true;
+    }
+
+    const choice = (json.choices && json.choices[0]) || {};
+    const delta = choice.delta || choice.message || json.delta || json.message || choice || json;
+
+    let chunkContent = '';
+    if (typeof delta.content === 'string') {
+      chunkContent = delta.content;
+    } else if (Array.isArray(delta.content)) {
+      for (const p of delta.content) {
+        if (p.type === 'text' && typeof p.text === 'string') chunkContent += p.text;
+      }
+    } else if (typeof delta.text === 'string') {
+      chunkContent = delta.text;
+    } else if (typeof choice.text === 'string') {
+      chunkContent = choice.text;
+    } else if (typeof json.response === 'string') {
+      chunkContent = json.response;
+    } else if (typeof json.text === 'string') {
+      chunkContent = json.text;
+    } else if (typeof json.content === 'string') {
+      chunkContent = json.content;
+    } else if (Array.isArray(json.content)) {
+      for (const p of json.content) {
+        if (p.type === 'text' && typeof p.text === 'string') chunkContent += p.text;
+      }
+    } else if (json.content_block && typeof json.content_block.text === 'string') {
+      chunkContent = json.content_block.text;
+    } else if (json.candidates && json.candidates[0]?.content?.parts) {
+      for (const p of json.candidates[0].content.parts) {
+        if (typeof p.text === 'string') chunkContent += p.text;
+      }
+    }
+
+    let chunkReasoning = '';
+    if (typeof delta.reasoning_content === 'string') {
+      chunkReasoning = delta.reasoning_content;
+    } else if (typeof delta.reasoning === 'string') {
+      chunkReasoning = delta.reasoning;
+    } else if (typeof delta.thinking === 'string') {
+      chunkReasoning = delta.thinking;
+    } else if (typeof delta.thought === 'string') {
+      chunkReasoning = delta.thought;
+    } else if (json.content_block && typeof json.content_block.thinking === 'string') {
+      chunkReasoning = json.content_block.thinking;
+    } else if (Array.isArray(delta.content)) {
+      for (const p of delta.content) {
+        if (p.type === 'thinking' && typeof p.thinking === 'string') chunkReasoning += p.thinking;
+      }
+    }
+
+    let changed = false;
+    if (chunkReasoning) {
+      reasoning += chunkReasoning;
+      changed = true;
+    }
+    if (chunkContent) {
+      content += chunkContent;
+      changed = true;
+    }
+
+    if (changed && onDelta) {
+      const keepGoing = onDelta({ content, reasoning, phase: content ? 'answer' : 'reasoning' });
+      if (keepGoing === false) {
+        cancelled = true;
+      }
+    }
+  };
 
   try {
     while (true) {
@@ -519,57 +636,35 @@ export async function consumeChatStream(response, handlers = {}) {
 
       for (const rawLine of lines) {
         const line = rawLine.trim();
-        if (!line || line.indexOf('data:') !== 0) continue;
+        if (!line) continue;
 
-        const payload = line.slice(5).trim();
+        let payload = '';
+        if (line.indexOf('data:') === 0) {
+          payload = line.slice(5).trim();
+        } else if (line.startsWith('{') && line.endsWith('}')) {
+          payload = line;
+        }
+
         if (!payload || payload === '[DONE]') continue;
-
-        let json;
-        try {
-          json = JSON.parse(payload);
-        } catch (e) {
-          continue; // 心跳包或半截数据，直接跳过
-        }
-
-        const choice = (json.choices && json.choices[0]) || {};
-        const delta = choice.delta || choice.message || json.delta || json.message || choice || json;
-
-        const chunkContent =
-          (typeof delta.content === 'string' && delta.content) ||
-          (typeof delta.text === 'string' && delta.text) ||
-          (typeof choice.text === 'string' && choice.text) ||
-          (typeof json.response === 'string' && json.response) ||
-          (typeof json.text === 'string' && json.text) ||
-          (typeof json.content === 'string' && json.content) ||
-          '';
-
-        const chunkReasoning =
-          (typeof delta.reasoning_content === 'string' && delta.reasoning_content) ||
-          (typeof delta.reasoning === 'string' && delta.reasoning) ||
-          (typeof delta.thinking === 'string' && delta.thinking) ||
-          (typeof delta.thought === 'string' && delta.thought) ||
-          '';
-
-        let changed = false;
-        if (chunkReasoning) {
-          reasoning += chunkReasoning;
-          changed = true;
-        }
-        if (chunkContent) {
-          content += chunkContent;
-          changed = true;
-        }
-
-        if (changed && onDelta) {
-          const keepGoing = onDelta({ content, reasoning, phase: content ? 'answer' : 'reasoning' });
-          if (keepGoing === false) {
-            cancelled = true;
-            break;
-          }
-        }
+        processPayload(payload);
+        if (cancelled) break;
       }
 
       if (cancelled) break;
+    }
+
+    // 处理末尾残留未加换行的数据
+    if (!cancelled && buffer && buffer.trim()) {
+      const line = buffer.trim();
+      let payload = '';
+      if (line.indexOf('data:') === 0) {
+        payload = line.slice(5).trim();
+      } else if (line.startsWith('{') && line.endsWith('}')) {
+        payload = line;
+      }
+      if (payload && payload !== '[DONE]') {
+        processPayload(payload);
+      }
     }
   } finally {
     if (cancelled) {
@@ -582,7 +677,7 @@ export async function consumeChatStream(response, handlers = {}) {
     content = reasoning;
   }
 
-  return { content, reasoning, cancelled };
+  return { content, reasoning, cancelled, error: lastError, hitLengthLimit, rawChunkCount, samplePayload };
 }
 
 /**
@@ -622,10 +717,7 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
     };
   }
 
-  let cleanBaseUrl = (config.baseUrl || '').trim().replace(/\/+$/, '');
-  if (!cleanBaseUrl) {
-    cleanBaseUrl = PROVIDER_PRESETS.deepseek.baseUrl;
-  }
+  const cleanBaseUrl = normalizeBaseUrl(config.baseUrl);
   const endpoint = `${cleanBaseUrl}/chat/completions`;
 
   const modelName = config.model || 'deepseek-chat';
@@ -673,9 +765,13 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
-      max_tokens: 250,
       stream: true
     };
+    if (/^o[134](-|$)/i.test(modelName)) {
+      requestBody.max_completion_tokens = 2000;
+    } else {
+      requestBody.max_tokens = 1500;
+    }
     if (!isReasoningModel) {
       const playstyle = AI_PLAYSTYLES[config.playstyle] || AI_PLAYSTYLES.openmind;
       const reqTemp = typeof config.temperature === 'number'
@@ -736,6 +832,32 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
         contentChars: content.length,
         reasoningChars: reasoning.length
       });
+    }
+
+    // 关键防退化兜底：如果流式响应内容为空且未取消（部分三方中转代理 SSE 存在空包兼容问题），自动发起非流式挽救请求！
+    if (!content.trim() && !cancelled) {
+      try {
+        const nonStreamBody = { ...requestBody, stream: false };
+        const nonStreamResp = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey.trim()}`
+          },
+          signal: controller.signal,
+          body: JSON.stringify(nonStreamBody)
+        });
+        if (nonStreamResp.ok) {
+          const nonStreamData = await nonStreamResp.json();
+          const nonStreamExtracted = extractFromNonStream(nonStreamData);
+          if (nonStreamExtracted.content.trim() || nonStreamExtracted.reasoning.trim()) {
+            content = nonStreamExtracted.content || nonStreamExtracted.reasoning;
+            reasoning = nonStreamExtracted.reasoning;
+          }
+        }
+      } catch (nonStreamErr) {
+        // 忽略非流式失败
+      }
     }
 
     clearTimers();
@@ -1043,8 +1165,7 @@ export async function testLLMConnection(config, options = {}) {
     return { success: false, message: '请先填写 API Key', lines, meta };
   }
 
-  let cleanBaseUrl = (config.baseUrl || '').trim().replace(/\/+$/, '');
-  if (!cleanBaseUrl) cleanBaseUrl = PROVIDER_PRESETS.deepseek.baseUrl;
+  const cleanBaseUrl = normalizeBaseUrl(config.baseUrl);
   const endpoint = `${cleanBaseUrl}/chat/completions`;
   const authHeaders = {
     'Content-Type': 'application/json',
@@ -1059,15 +1180,20 @@ export async function testLLMConnection(config, options = {}) {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), handshakeTimeoutMs);
+    const handshakeBody = {
+      model: meta.model,
+      messages: [{ role: 'user', content: 'ping' }]
+    };
+    if (/^o[134](-|$)/i.test(meta.model)) {
+      handshakeBody.max_completion_tokens = 50;
+    } else {
+      handshakeBody.max_tokens = 50;
+    }
     handshakeResponse = await fetch(endpoint, {
       method: 'POST',
       headers: authHeaders,
       signal: controller.signal,
-      body: JSON.stringify({
-        model: meta.model,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 5
-      })
+      body: JSON.stringify(handshakeBody)
     });
     clearTimeout(timer);
   } catch (err) {
@@ -1128,6 +1254,7 @@ export async function testLLMConnection(config, options = {}) {
   let sawStream = false;
   let content = '';
   let reasoning = '';
+  let streamResult = null;
 
   const clearTimers = () => {
     if (idleTimer) clearTimeout(idleTimer);
@@ -1150,19 +1277,25 @@ export async function testLLMConnection(config, options = {}) {
       controller.abort();
     }, totalTimeoutMs);
 
+    const probeBody = {
+      model: meta.model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      stream: true
+    };
+    if (/^o[134](-|$)/i.test(meta.model)) {
+      probeBody.max_completion_tokens = 2000;
+    } else {
+      probeBody.max_tokens = 1500;
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: authHeaders,
       signal: controller.signal,
-      body: JSON.stringify({
-        model: meta.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        max_tokens: 250,
-        stream: true
-      })
+      body: JSON.stringify(probeBody)
     });
 
     if (!response.ok) {
@@ -1177,7 +1310,7 @@ export async function testLLMConnection(config, options = {}) {
 
     if (contentType.indexOf('text/event-stream') !== -1 && response.body) {
       sawStream = true;
-      const streamed = await consumeChatStream(response, {
+      streamResult = await consumeChatStream(response, {
         onIdle: () => {
           if (firstByteMs === null) firstByteMs = Date.now() - probeStart;
           armIdle();
@@ -1194,14 +1327,41 @@ export async function testLLMConnection(config, options = {}) {
           return true;
         }
       });
-      content = streamed.content;
-      reasoning = streamed.reasoning;
+      content = streamResult.content;
+      reasoning = streamResult.reasoning;
     } else {
       const data = await response.json();
       const extracted = extractFromNonStream(data);
       content = extracted.content;
       reasoning = extracted.reasoning;
       firstByteMs = Date.now() - probeStart;
+    }
+
+    // 关键防退化兜底：如果流式响应内容为空（常见于部分第三方代理对 Claude SSE 流式支持不完善），自动发起非流式挽救请求！
+    if (!content.trim()) {
+      try {
+        const retryBody = { ...probeBody, stream: false };
+        const retryResp = await fetch(endpoint, {
+          method: 'POST',
+          headers: authHeaders,
+          signal: controller.signal,
+          body: JSON.stringify(retryBody)
+        });
+        if (retryResp.ok) {
+          const retryData = await retryResp.json();
+          const retryExtracted = extractFromNonStream(retryData);
+          if (retryExtracted.content.trim() || retryExtracted.reasoning.trim()) {
+            content = retryExtracted.content || retryExtracted.reasoning;
+            reasoning = retryExtracted.reasoning;
+            lines.push({
+              level: 'warn',
+              text: '提示：服务端 SSE 流式传输为空（代理通道流式不兼容），已自动无缝切换为非流式通道并成功返回落子！'
+            });
+          }
+        }
+      } catch (retryErr) {
+        // 忽略非流式重试失败，继续进入详细诊断
+      }
     }
 
     clearTimers();
@@ -1251,8 +1411,22 @@ export async function testLLMConnection(config, options = {}) {
       lines.push({ level: 'warn', text: `模型返回坐标 ${parsed.coord} 越界，对弈时会自动校准为本地候选点` });
     }
   } else {
-    const snippet = content ? content.trim().replace(/\s+/g, ' ').slice(0, 35) : '空';
-    lines.push({ level: 'warn', text: `模型未按要求返回 JSON 坐标（原始输出："${snippet}..."），对弈时将改由本地引擎候选点兜底` });
+    let failReason = '';
+    if (streamResult && streamResult.error) {
+      failReason = `服务商返回错误：${streamResult.error}`;
+    } else if (streamResult && streamResult.hitLengthLimit) {
+      failReason = '模型输出因达到 Token 上限被截断（可能是深度推理思考耗尽了配额）';
+    } else if (content) {
+      const snippet = content.trim().replace(/\s+/g, ' ').slice(0, 40);
+      failReason = `模型未按要求返回坐标（原始输出："${snippet}..."）`;
+    } else if (streamResult && streamResult.rawChunkCount === 0) {
+      failReason = '服务端未推送任何数据即断开连接（请检查模型名称是否正确或接口是否支持该模型）';
+    } else if (streamResult && streamResult.samplePayload) {
+      failReason = `服务端返回了非标准数据结构（样本："${streamResult.samplePayload.slice(0, 50)}..."）`;
+    } else {
+      failReason = '模型返回内容为空（请检查该模型是否有可用额度或权限）';
+    }
+    lines.push({ level: 'warn', text: `${failReason}，对弈时将改由本地引擎候选点兜底` });
   }
 
   const verdict = buildVerdict(meta);
@@ -1307,8 +1481,7 @@ export async function requestDeepAnalysis(config, context) {
     return { ok: false, error: '尚未配置大模型 API Key，请先在「设置」中填写 DeepSeek / Gemini 等密钥' };
   }
 
-  let cleanBaseUrl = (config.baseUrl || '').trim().replace(/\/+$/, '');
-  if (!cleanBaseUrl) cleanBaseUrl = PROVIDER_PRESETS.deepseek.baseUrl;
+  const cleanBaseUrl = normalizeBaseUrl(config.baseUrl);
   const endpoint = `${cleanBaseUrl}/chat/completions`;
 
   const systemPrompt = `你是一位职业五子棋（连珠）教练兼棋局分析引擎，负责为业余棋手做逐手复盘。
@@ -1364,7 +1537,8 @@ ${context.localReport}
     }
 
     const data = await response.json();
-    let text = data.choices?.[0]?.message?.content || '';
+    const extracted = extractFromNonStream(data);
+    let text = extracted.content || extracted.reasoning || '';
     text = text.replace(/```(?:\w+)?/gi, '').replace(/```/g, '').trim();
 
     if (!text) {
