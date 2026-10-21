@@ -283,7 +283,7 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
     return { urgent: [], attack: [], defense: [], flank: [], fallback: def, summaryText: '  • [H8]：中宫落子' };
   }
 
-  // 紧急情况处理（连五绝杀 或 封堵致命冲四/活四）
+  // 紧急情况处理（连五绝杀 或 封堵致命冲四/活四/双重杀）
   const urgent = [];
   for (const pt of evaluatedPoints) {
     if (pt.attackScore >= SCORES.WIN) {
@@ -293,7 +293,9 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
     } else if (pt.attackScore >= SCORES.LIVE_FOUR) {
       urgent.push({ ...pt, desc: '⚡ 己方成活四！两头通绝杀，必胜之机！' });
     } else if (pt.defenseScore >= SCORES.LIVE_FOUR) {
-      urgent.push({ ...pt, desc: '⚠️ 敌方活四成型在即！必须紧急堵截！' });
+      urgent.push({ ...pt, desc: '⚠️ 敌方活四成型在即（已有活三）！必须紧急堵截！' });
+    } else if (pt.defenseScore >= SCORES.LIVE_THREE * 1.8) {
+      urgent.push({ ...pt, desc: '⚠️ 敌方双重杀线（双三/四三）在即！必须抢先阻断！' });
     }
   }
 
@@ -417,6 +419,13 @@ export function buildPrompt(board, myColor, history, rawCandidates = [], configO
   const lastMove = history && history.length > 0 ? history[history.length - 1] : null;
   const boardAscii = renderBoardAscii(board, lastMove);
 
+  const hasUrgentThreat = (tactical.urgent || []).length > 0;
+  const urgentWarning = hasUrgentThreat
+    ? `\n\n【🚨 最高防守铁律·生死攸关警报】
+当前盘面检测到致命威胁（敌方已有活三或冲四，或己方有绝杀）！
+五子棋绝对规则：一旦敌方形成活三，必须在活三两端紧急封堵！任何大局外势在生死威胁面前均无意义，绝不可在无关空位落子！请务必从上方【🚨 紧急胜负手】中挑选落子！`
+    : '';
+
   const systemPrompt = `${persona.prompt}
 
 ${playstyle.prompt}
@@ -432,7 +441,7 @@ ${boardAscii}
 
 【落子决策要求】
 1. 观察上方 15x15 真实盘面，理解整体黑白势力分布与空旷区域。
-2. 结合你的【战略棋风偏好】权衡决策。除参考系统推演选项外，只要是盘面上未被占用的空位合法坐标，你都可以根据宏观大局自由决定！
+2. 结合你的【战略棋风偏好】权衡决策。除参考系统推演选项外，只要是盘面上未被占用的空位合法坐标，你都可以根据宏观大局自由决定；但若存在【🚨 紧急胜负手】（敌方活三/冲四），你必须优先封堵生死威胁！${urgentWarning}
 3. 请同时输出一句符合你人设口吻的生动对弈交流（20~50字以内）。
 
 【输出格式约束】
@@ -442,7 +451,7 @@ ${boardAscii}
   const userPrompt = `当前对局态势：
 - 最近步数回顾：${formatMoveHistory(history)}
 
-${tactical.summaryText}
+${tactical.summaryText}${hasUrgentThreat ? '\n\n【⚠️ 紧急提醒】：敌方已有致命杀线（活三/冲四）或己方绝杀！请务必优先选择【🚨 紧急胜负手】中的坐标！' : ''}
 
 请综合评估全局局势，挑选你决定落子的坐标，并说一句符合你性格的对话。请必须且仅输出严格的 JSON 对象（不要写任何解释、不要写前置废话）：
 {"coord": "落子坐标", "comment": "对弈发言"}`;
@@ -902,17 +911,17 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
             r: winMove.r,
             c: winMove.c,
             notation: winMove.coord,
-            comment: parsed.comment || '五子连珠，锁定胜局！',
+            comment: parsed.comment ? `${parsed.comment}（五子连珠，锁定胜局！）` : '五子连珠，锁定胜局！',
             isFallback: false,
             elapsedMs,
             reasoning
           };
         }
 
-        // B. 敌方即将连五绝杀：若 LLM 未堵截该致命威胁，紧急封死！
+        // B. 敌方即将连五绝杀（冲四/成五）：若 LLM 未堵截该致命威胁，紧急封死！
         const blockWinMoves = (tactical?.urgent || []).filter(u => u.defenseScore >= SCORES.WIN);
         if (blockWinMoves.length > 0 && !blockWinMoves.some(b => b.r === coord[0] && b.c === coord[1])) {
-          const emergencyBlock = blockWinMoves[0];
+          const emergencyBlock = blockWinMoves.sort((a, b) => b.defenseScore - a.defenseScore)[0];
           return {
             r: emergencyBlock.r,
             c: emergencyBlock.c,
@@ -922,6 +931,33 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
             elapsedMs,
             reasoning
           };
+        }
+
+        // C. 己方有活四杀招（两头通绝杀）：优先进攻绝杀！
+        const myLiveFour = tactical?.urgent?.find(u => u.attackScore >= SCORES.LIVE_FOUR);
+
+        // D. 敌方即将成活四（敌方已有活三）或双重杀线（双活三/四三杀）：
+        // 五子棋铁律：一旦敌方下出活四两头通，下回合必死无疑，神仙难救！
+        // 若己方没有成五或成活四的绝杀，必须强制堵截活三！
+        const blockThreatMoves = (tactical?.urgent || []).filter(u => u.defenseScore >= SCORES.LIVE_FOUR || u.defenseScore >= SCORES.LIVE_THREE * 1.8);
+        if (blockThreatMoves.length > 0) {
+          const llmMoveIsBlock = blockThreatMoves.some(b => b.r === coord[0] && b.c === coord[1]);
+          const llmMoveIsAttackWin = myLiveFour && (myLiveFour.r === coord[0] && myLiveFour.c === coord[1]);
+          if (!llmMoveIsBlock && !llmMoveIsAttackWin) {
+            // LLM 选了一个无关痛痒的点（例如脱离战场的奇兵），强制紧急阻截！
+            const emergencyBlock = blockThreatMoves.sort((a, b) => b.defenseScore - a.defenseScore || b.totalScore - a.totalScore)[0];
+            return {
+              r: emergencyBlock.r,
+              c: emergencyBlock.c,
+              notation: emergencyBlock.coord,
+              comment: parsed.comment
+                ? `${parsed.comment}（警惕！敌方活三已成，若不堵截必成活四绝杀！紧急拦截在 [${emergencyBlock.coord}]）`
+                : `警惕！敌方活三已成，紧急拦截在 [${emergencyBlock.coord}]！`,
+              isFallback: false,
+              elapsedMs,
+              reasoning
+            };
+          }
         }
 
         return {
