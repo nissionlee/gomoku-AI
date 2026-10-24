@@ -703,14 +703,11 @@ export async function consumeChatStream(response, handlers = {}) {
  * @returns {Promise<{ r: number, c: number, notation: string, comment: string, isFallback: boolean,
  *                     timedOut?: boolean, cancelled?: boolean, elapsedMs: number, reasoning?: string }>}
  */
-export async function getLLMMove(config, board, myColor, history, candidates, options = {}) {
+/**
+ * 调用单次大模型 API 进行对弈落子（流式 + 双超时 + 完整棋形安全防御）
+ */
+async function callSingleLLM(config, board, myColor, promptPack, candidates, options = {}) {
   const startedAt = Date.now();
-
-  const promptPack = buildPrompt(board, myColor, history, candidates, {
-    persona: config.persona,
-    playstyle: config.playstyle || 'openmind',
-    checkBlackForbidden: myColor === BLACK
-  });
   const { systemPrompt, userPrompt, tactical } = promptPack;
 
   const fallbackMove = (tactical && tactical.fallback)
@@ -734,8 +731,9 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
   const isReasoningModel = /reasoner|thinking|qwq|\br1\b|\bo1\b|\bo3\b/i.test(modelName);
 
   // 双超时：空闲超时（多久收不到数据算卡死）+ 总超时（整轮硬上限）
-  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : 45000;
-  const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs) ? options.totalTimeoutMs : 180000;
+  const defaultIdleSec = Number(config.timeoutSec) || 90;
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : defaultIdleSec * 1000;
+  const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs) ? options.totalTimeoutMs : Math.max(180000, idleTimeoutMs * 2);
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
 
   const controller = new AbortController();
@@ -805,9 +803,10 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
       clearTimers();
       return {
         ...fallbackMove,
-        comment: `（API 响应异常 ${response.status}，已由本地引擎执棋）`,
+        comment: `（API 响应异常 ${response.status}）`,
         isFallback: true,
-        elapsedMs: Date.now() - startedAt
+        elapsedMs: Date.now() - startedAt,
+        errorStatus: response.status
       };
     }
 
@@ -989,7 +988,7 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
       const waitSec = Math.round((abortCause === 'idle' ? idleTimeoutMs : totalTimeoutMs) / 1000);
       return {
         ...fallbackMove,
-        comment: `（大模型 ${waitSec} 秒无响应已超时，改由本地引擎落子）`,
+        comment: `（大模型 ${waitSec} 秒无响应已超时）`,
         isFallback: true,
         timedOut: true,
         timeoutKind: abortCause,
@@ -1010,11 +1009,212 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
     console.error('LLM Fetch Error:', error);
     return {
       ...fallbackMove,
-      comment: '（网络连接异常，已由本地智能引擎落子）',
+      comment: '（网络连接异常）',
       isFallback: true,
       elapsedMs
     };
   }
+}
+
+/**
+ * 调用大模型 API 进行对弈落子（支持单步超时自定义 + 备用大模型故障无缝自动接管）
+ * @param {Object} config API 配置 { provider, baseUrl, apiKey, model, persona, timeoutSec, enableBackup, backupModel... }
+ * @param {number[][]} board 棋盘状态
+ * @param {number} myColor AI 棋子颜色
+ * @param {Array} history 落子历史
+ * @param {Array} candidates 本地引擎预选点
+ * @param {Object} [options]
+ *   onProgress({ phase, text, contentChars, reasoningChars, elapsedMs }) 流式进度回调，返回 false 可中止
+ *   idleTimeoutMs  空闲超时：多久收不到数据算卡死（未指定时优先读取 config.timeoutSec，默认 90000）
+ *   totalTimeoutMs 总超时：整轮硬上限（默认 180000）
+ * @returns {Promise<{ r: number, c: number, notation: string, comment: string, isFallback: boolean,
+ *                     timedOut?: boolean, cancelled?: boolean, elapsedMs: number, reasoning?: string, usedBackup?: boolean }>}
+ */
+export async function getLLMMove(config, board, myColor, history, candidates, options = {}) {
+  const startedAt = Date.now();
+
+  const promptPack = buildPrompt(board, myColor, history, candidates, {
+    persona: config.persona,
+    playstyle: config.playstyle || 'openmind',
+    checkBlackForbidden: myColor === BLACK
+  });
+  const { tactical } = promptPack;
+  const fallbackMove = (tactical && tactical.fallback)
+    ? { r: tactical.fallback.r, c: tactical.fallback.c, notation: tactical.fallback.coord }
+    : (candidates[0] || { r: 7, c: 7, notation: 'H8' });
+
+  if (!config.apiKey || config.apiKey.trim() === '') {
+    return {
+      ...fallbackMove,
+      comment: '（未配置 API Key，已切换为本地智能落子）',
+      isFallback: true,
+      elapsedMs: 0
+    };
+  }
+
+  const defaultTimeoutSec = Number(config.timeoutSec) || 90;
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : defaultTimeoutSec * 1000;
+
+  // 1. 先尝试主模型调用
+  let primaryResult = await callSingleLLM(config, board, myColor, promptPack, candidates, {
+    ...options,
+    idleTimeoutMs
+  });
+
+  // 主模型应答成功或玩家已撤销/重开，直接返回
+  if (!primaryResult.isFallback || primaryResult.cancelled) {
+    return primaryResult;
+  }
+
+  const policy = config.failoverPolicy || 'auto_backup';
+  const hasBackup = Boolean(config.enableBackup && (config.backupModel || '').trim());
+  const backupConfig = hasBackup ? {
+    ...config,
+    provider: config.backupProvider || config.provider,
+    baseUrl: (config.backupBaseUrl && config.backupBaseUrl.trim()) ? config.backupBaseUrl.trim() : config.baseUrl,
+    apiKey: (config.backupApiKey && config.backupApiKey.trim()) ? config.backupApiKey.trim() : config.apiKey,
+    model: config.backupModel.trim()
+  } : null;
+
+  const failReason = primaryResult.timedOut
+    ? `超时（已等待 ${Math.round(primaryResult.elapsedMs / 1000)}s）`
+    : (primaryResult.comment || '连接异常');
+
+  // 2. 策略为「弹窗询问我」时的处理
+  if (policy === 'ask_player' && typeof options.onRequestPlayerAction === 'function') {
+    const action = await options.onRequestPlayerAction({
+      stage: 'primary_failed',
+      primaryResult,
+      hasBackup,
+      backupModel: backupConfig?.model,
+      failReason
+    });
+
+    if (action === 'retry') {
+      if (typeof options.onProgress === 'function') {
+        options.onProgress({
+          phase: 'reasoning',
+          text: `继续等待中，正在重新请求主模型 [${config.model || '主模型'}]（增加 60 秒等待时间）…`,
+          contentChars: 0,
+          reasoningChars: 0,
+          elapsedMs: Date.now() - startedAt
+        });
+      }
+      const retryResult = await callSingleLLM(config, board, myColor, promptPack, candidates, {
+        ...options,
+        idleTimeoutMs: idleTimeoutMs + 60000,
+        totalTimeoutMs: (options.totalTimeoutMs || 180000) + 60000
+      });
+      if (!retryResult.isFallback || retryResult.cancelled) {
+        return retryResult;
+      }
+      primaryResult = retryResult;
+    } else if (action === 'backup' && backupConfig) {
+      if (typeof options.onProgress === 'function') {
+        options.onProgress({
+          phase: 'reasoning',
+          text: `正在改用备用大模型 [${backupConfig.model}] 计算落子…`,
+          contentChars: 0,
+          reasoningChars: 0,
+          elapsedMs: Date.now() - startedAt
+        });
+      }
+      const backupResult = await callSingleLLM(backupConfig, board, myColor, promptPack, candidates, {
+        ...options,
+        idleTimeoutMs
+      });
+      if (!backupResult.isFallback) {
+        return {
+          ...backupResult,
+          usedBackup: true,
+          comment: (backupResult.comment ? `${backupResult.comment} ` : '') + `（已切换备用大模型 [${backupConfig.model}] 接管落子）`
+        };
+      }
+      return backupResult;
+    } else if (action === 'local') {
+      return {
+        ...primaryResult,
+        comment: '（大模型响应异常，已由本地引擎代下）'
+      };
+    }
+  }
+
+  // 3. 策略为「自动切备用模型」且已配置备用模型
+  if (policy !== 'auto_local' && hasBackup && backupConfig) {
+    if (typeof options.onProgress === 'function') {
+      options.onProgress({
+        phase: 'reasoning',
+        text: `主模型 [${config.model || '主模型'}] ${failReason}，正在自动无缝唤醒备用大模型 [${backupConfig.model}] 接管对弈…`,
+        contentChars: 0,
+        reasoningChars: 0,
+        elapsedMs: Date.now() - startedAt
+      });
+    }
+
+    const backupResult = await callSingleLLM(backupConfig, board, myColor, promptPack, candidates, {
+      ...options,
+      idleTimeoutMs
+    });
+
+    if (!backupResult.isFallback) {
+      return {
+        ...backupResult,
+        usedBackup: true,
+        comment: (backupResult.comment ? `${backupResult.comment} ` : '') + `（主模型 ${failReason}，已由备用大模型 [${backupConfig.model}] 接管落子）`
+      };
+    }
+
+    // 备用模型也失败了，如果提供了弹窗回调，询问玩家要不要再等等或切本地
+    if (typeof options.onRequestPlayerAction === 'function') {
+      const action = await options.onRequestPlayerAction({
+        stage: 'all_failed',
+        primaryResult,
+        backupResult,
+        hasBackup: true,
+        backupModel: backupConfig.model,
+        failReason: `主备模型均未响应（主模型 ${failReason}，备用模型也超时/异常）`
+      });
+      if (action === 'retry') {
+        const retryResult = await callSingleLLM(config, board, myColor, promptPack, candidates, {
+          ...options,
+          idleTimeoutMs: idleTimeoutMs + 60000
+        });
+        if (!retryResult.isFallback) return retryResult;
+      }
+    }
+
+    return {
+      ...backupResult,
+      primaryTimedOut: primaryResult.timedOut,
+      backupTimedOut: backupResult.timedOut,
+      hasBackup: true,
+      backupModel: backupConfig.model,
+      comment: `（主模型与备用模型均未能正常应答：主模型 ${failReason}，备用模型也无响应）`
+    };
+  }
+
+  // 4. 未启用备用模型但主模型异常：若非 auto_local 则询问玩家是否继续等待或由本地代下
+  if (policy !== 'auto_local' && typeof options.onRequestPlayerAction === 'function') {
+    const action = await options.onRequestPlayerAction({
+      stage: 'primary_failed_no_backup',
+      primaryResult,
+      hasBackup: false,
+      failReason
+    });
+    if (action === 'retry') {
+      const retryResult = await callSingleLLM(config, board, myColor, promptPack, candidates, {
+        ...options,
+        idleTimeoutMs: idleTimeoutMs + 60000
+      });
+      if (!retryResult.isFallback) return retryResult;
+    }
+  }
+
+  return {
+    ...primaryResult,
+    hasBackup: false,
+    timeoutSec: defaultTimeoutSec
+  };
 }
 
 /**
@@ -1277,8 +1477,9 @@ export async function testLLMConnection(config, options = {}) {
     text: `探测棋局：${useCurrentBoard ? '当前盘面' : '内置基准局面'}（候选点 ${candidates.length} 个）`
   });
 
-  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : 45000;
-  const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs) ? options.totalTimeoutMs : 180000;
+  const defaultIdleSec = Number(config.timeoutSec) || 90;
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : defaultIdleSec * 1000;
+  const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs) ? options.totalTimeoutMs : Math.max(180000, idleTimeoutMs * 2);
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
 
   const probeStart = Date.now();

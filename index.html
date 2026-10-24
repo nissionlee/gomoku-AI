@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
   <title>弈境五子棋 · 多用户联机与 AI 对弈</title>
   <meta name="description" content="在线五子棋平台：多账号登录、实时联机对战、人机对弈（本地算法 / 大模型 DeepSeek、Gemini、OpenAI），先手三三四四禁手规则。">
-  <link rel="stylesheet" href="css/style.css?v=2026.10.21-openmind-v9">
+  <link rel="stylesheet" href="css/style.css?v=2026.10.24-failover-v1">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23222'/><circle cx='40' cy='38' r='10' fill='%23666'/></svg>">
   <script>
     (function() {
@@ -426,7 +426,7 @@
         <!-- 大模型专用配置区块 -->
         <div id="llmConfigSection" class="llm-config-box">
           <h3 class="box-title">🤖 大模型 API 配置</h3>
-          <p class="box-desc">支持任意兼容 OpenAI 接口规范的服务商。密钥保存在您的本地浏览器中，安全无泄露风险。落子采用流式输出，思考过程实时可见；若 45 秒内收不到任何数据，将自动改由本地引擎代下。</p>
+          <p class="box-desc">支持任意兼容 OpenAI 接口规范的服务商。密钥保存在您的本地浏览器中，安全无泄露风险。落子采用流式输出，思考过程实时可见；支持自定义超时等待与备用大模型故障无缝自动接力，避免网络波动影响棋局。</p>
 
           <div class="form-group">
             <label class="form-label">快速选择服务商：</label>
@@ -489,6 +489,80 @@
             <p class="form-hint" style="font-size: 0.8rem; color: var(--text-dim); margin-top: 4px;">
               数值越高，棋路越发散灵动、局局千变万化；数值越低，走法越收敛固定（推理模型如 R1/o1 忽略此项）。
             </p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cfgLlmTimeout">单步思考超时等待时间：</label>
+            <select id="cfgLlmTimeout" class="form-control">
+              <option value="45">45 秒 (快速响应 · 适合简单模型)</option>
+              <option value="60">60 秒 (标准等待)</option>
+              <option value="90" selected>90 秒 (推荐 · 适合带思考/推理模型与高峰期)</option>
+              <option value="120">120 秒 (2分钟 · 深度推理模型)</option>
+              <option value="180">180 秒 (3分钟 · 复杂长链思考)</option>
+              <option value="300">300 秒 (5分钟 · 超长推理防卡死)</option>
+            </select>
+            <p class="form-hint" style="font-size: 0.8rem; color: var(--text-dim); margin-top: 4px;">
+              ⏱️ 避免因中转 API 排队或推理模型（如 R1/QwQ/Nemotron）深度思考被过早判定超时。
+            </p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cfgLlmFailoverPolicy">超时与故障接管策略：</label>
+            <select id="cfgLlmFailoverPolicy" class="form-control">
+              <option value="auto_backup" selected>🔄 自动切换备用大模型 (推荐 · 无缝接力)</option>
+              <option value="ask_player">🙋 弹窗询问我 (可选择再等一等、切备用模型或本地代下)</option>
+              <option value="auto_local">🤖 直接由本地智能引擎代下</option>
+            </select>
+            <p class="form-hint" style="font-size: 0.8rem; color: var(--text-dim); margin-top: 4px;">
+              🛡️ 当主模型遇到超时、限流或网络波动时，决定如何继续对弈。
+            </p>
+          </div>
+
+          <!-- 备用大模型配置区块 -->
+          <div class="backup-llm-card" style="margin: 14px 0; padding: 12px; background: rgba(0, 0, 0, 0.02); border: 1px dashed var(--border-color); border-radius: 8px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+              <label class="checkbox-label" style="font-weight: 600; cursor: pointer; margin-bottom: 0;">
+                <input type="checkbox" id="cfgLlmEnableBackup"> 启用备用大模型 (故障或超时自动替补)
+              </label>
+              <span class="badge" style="font-size: 0.75rem; background: var(--bg-hover); padding: 2px 8px; border-radius: 10px;">容灾备份</span>
+            </div>
+            <p class="form-hint" style="font-size: 0.8rem; color: var(--text-dim); margin-bottom: 10px;">
+              若主模型（如 Nemotron 或 Claude）偶尔超时或排队，自动唤醒更快速稳定的备用模型（如 deepseek-chat 或 gpt-4o-mini）接力落子。
+            </p>
+
+            <div id="backupLlmFields" style="display: none; flex-direction: column; gap: 10px;">
+              <div class="form-group" style="margin-bottom: 8px;">
+                <label class="form-label">备用模型服务商：</label>
+                <select id="cfgLlmBackupProvider" class="form-control">
+                  <option value="deepseek">DeepSeek (推荐)</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI (ChatGPT)</option>
+                  <option value="qwen">阿里通义千问</option>
+                  <option value="moonshot">月之暗面 (Kimi)</option>
+                  <option value="custom">自定义 / 与主配置相同</option>
+                </select>
+              </div>
+
+              <div class="form-group" style="margin-bottom: 8px;">
+                <label class="form-label">备用模型名称 (Model)：</label>
+                <input type="text" id="cfgLlmBackupModel" class="form-control" placeholder="例如 deepseek-chat 或 gpt-4o-mini">
+              </div>
+
+              <div class="form-group" style="margin-bottom: 8px;">
+                <label class="form-label">备用 Base URL (留空则自动继承主配置)：</label>
+                <input type="text" id="cfgLlmBackupBaseUrl" class="form-control" placeholder="留空自动继承主配置 Base URL">
+              </div>
+
+              <div class="form-group" style="margin-bottom: 8px;">
+                <label class="form-label">备用 API Key (留空则自动继承主配置)：</label>
+                <input type="password" id="cfgLlmBackupApiKey" class="form-control" placeholder="留空自动继承主配置 API Key">
+              </div>
+
+              <div class="test-row" style="margin-top: 6px;">
+                <button type="button" id="btnTestBackupLlm" class="btn btn-outline-sm">🩺 实测备用模型连通性</button>
+              </div>
+              <div id="llmBackupTestResult" class="test-result" style="margin-top: 6px;"></div>
+            </div>
           </div>
 
           <div class="test-row">
@@ -650,6 +724,24 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js?v=2026.10.21-openmind-v9"></script>
+  <!-- 5. 大模型超时与故障交互 Modal -->
+  <div id="llmTimeoutModal" class="modal-overlay">
+    <div class="modal-card modal-sm text-center" style="max-width: 440px;">
+      <div class="win-icon" style="font-size: 2.2rem; margin-bottom: 8px;">⏳</div>
+      <h2 id="llmTimeoutTitle" class="win-title" style="font-size: 1.25rem;">大模型未在预期时间内应答</h2>
+      <p id="llmTimeoutDesc" class="win-subtitle" style="font-size: 0.88rem; line-height: 1.5; color: var(--text-dim); margin-bottom: 16px;">
+        大模型思考已超过设定时间。可能由于模型正在进行复杂长链推理，或中转服务出现排队延迟。请选择接下来的处理方式：
+      </p>
+
+      <div class="win-actions" style="display: flex; flex-direction: column; gap: 8px;">
+        <button id="btnTimeoutWaitMore" class="btn btn-primary btn-block">⏳ 再等一等（增加 60 秒继续等待）</button>
+        <button id="btnTimeoutSwitchBackup" class="btn btn-info btn-block" style="display: none;">🔄 立即改用备用大模型落子</button>
+        <button id="btnTimeoutConfigureBackup" class="btn btn-outline-sm btn-block" style="display: none;">⚙️ 打开设置配置备用大模型</button>
+        <button id="btnTimeoutLocalFallback" class="btn btn-secondary btn-block">🤖 仅本步改由本地引擎代下</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js?v=2026.10.24-failover-v1"></script>
 </body>
 </html>

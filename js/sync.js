@@ -128,7 +128,14 @@ export function buildPayload(settings, updatedAt = Date.now()) {
       model: clampString(llm.model, 80),
       persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous',
       playstyle: PLAYSTYLES.includes(llm.playstyle) ? llm.playstyle : 'openmind',
-      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85
+      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85,
+      timeoutSec: typeof llm.timeoutSec === 'number' ? Math.max(15, Math.min(600, llm.timeoutSec)) : 90,
+      failoverPolicy: ['auto_backup', 'ask_player', 'auto_local'].includes(llm.failoverPolicy) ? llm.failoverPolicy : 'auto_backup',
+      enableBackup: toBool(llm.enableBackup, false),
+      backupProvider: PROVIDERS.includes(llm.backupProvider) ? llm.backupProvider : 'deepseek',
+      backupBaseUrl: clampString(llm.backupBaseUrl, 200),
+      backupApiKey: clampString(llm.backupApiKey, 200),
+      backupModel: clampString(llm.backupModel, 80)
     }
   };
 
@@ -171,7 +178,14 @@ export function parseRemotePayload(payload) {
       model: clampString(llm.model, 80),
       persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous',
       playstyle: PLAYSTYLES.includes(llm.playstyle) ? llm.playstyle : 'openmind',
-      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85
+      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85,
+      timeoutSec: typeof llm.timeoutSec === 'number' ? Math.max(15, Math.min(600, llm.timeoutSec)) : 90,
+      failoverPolicy: ['auto_backup', 'ask_player', 'auto_local'].includes(llm.failoverPolicy) ? llm.failoverPolicy : 'auto_backup',
+      enableBackup: toBool(llm.enableBackup, false),
+      backupProvider: PROVIDERS.includes(llm.backupProvider) ? llm.backupProvider : 'deepseek',
+      backupBaseUrl: clampString(llm.backupBaseUrl, 200),
+      backupApiKey: clampString(llm.backupApiKey, 200),
+      backupModel: clampString(llm.backupModel, 80)
     }
   };
 

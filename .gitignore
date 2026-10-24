@@ -4,3 +4,5 @@ node_modules/
 Thumbs.db
 .workbuddy-ai/
 _deploy_stage/
+
+scratch/

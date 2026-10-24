@@ -23,7 +23,14 @@ const DEFAULT_SETTINGS = {
     model: 'deepseek-chat',
     persona: 'humorous',
     playstyle: 'openmind',       // 'openmind' | 'aggressive' | 'defensive' | 'balanced'
-    temperature: 0.85            // 发散度/创造力，0.1~1.2，默认 0.85 灵动下棋
+    temperature: 0.85,           // 发散度/创造力，0.1~1.2，默认 0.85 灵动下棋
+    timeoutSec: 90,              // 单步超时等待时间（秒），默认 90 秒，给深度推理模型充足时间
+    failoverPolicy: 'auto_backup', // 故障接管策略: 'auto_backup' (自动切备用大模型) | 'ask_player' (弹窗询问我) | 'auto_local' (由本地代下)
+    enableBackup: false,         // 是否启用备用大模型
+    backupProvider: 'deepseek',  // 备用服务商
+    backupBaseUrl: '',           // 备用 Base URL (留空继承主配置)
+    backupApiKey: '',            // 备用 API Key (留空继承主配置)
+    backupModel: ''              // 备用模型名称 (如 deepseek-chat 或 gpt-4o-mini)
   }
 };
 
@@ -42,6 +49,7 @@ export class StorageManager {
    */
   static getSettings() {
     try {
+      if (typeof localStorage === 'undefined') return { ...DEFAULT_SETTINGS };
       const data = localStorage.getItem(SETTINGS_KEY);
       if (data) {
         const parsed = JSON.parse(data);
