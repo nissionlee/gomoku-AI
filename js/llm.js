@@ -78,13 +78,13 @@ export const AI_PLAYSTYLES = {
   openmind: {
     name: '天马行空',
     tag: '🌌 灵动奇谋',
-    desc: '视野开阔，格局宏大。善用大局外势、跳三奇袭与意料之外的巧手，打破千篇一律的局部套路。',
-    defaultTemperature: 0.85,
+    desc: '视野开阔，灵动善变。善用大局外势、跳二跳三奇袭与多线策应，打破千篇一律的局部死缠。',
+    defaultTemperature: 0.8,
     prompt: `【战略棋风偏好：天马行空 / 灵动奇谋】
-你下棋追求宏观视野与出其不意，极度厌倦千篇一律的机械套路。
-1. 拓宽视野：绝不盲目死缠在刚落子周围一两格狭小局部。在没有即刻生死威胁时，敢于在外围开阔星位布下疑兵，或者利用跳步、大局联络构筑立体攻防。
-2. 灵动多变：你喜欢富有想象力与战略弹性的走法，打破常规思维定式，让对手捉摸不透。
-3. 危机清醒：若己方出现连五必胜手，或对手出现冲四/活四致命威胁，必须果断出击或精确封堵！`
+你追求灵动多变、出其不意的棋风，打破千篇一律的机械套路。
+1. 灵动策应：在没有即刻生死威胁时，善于利用跳一步（跳二）、大飞等富有弹性的手段开辟侧翼战线，与远端子力立体呼应，绝不死板硬凑。
+2. 严守战术底线：五子棋不同于围棋，严禁去离主战场四五格开外的荒漠空旷角落（如盘角A1、A14等毫无联系的位置）下完全脱节的废子！任何灵动走法必须与已有棋子保持战术接触（相距不超过2格）。
+3. 危机清醒：若己方出现连五必胜手，或对手出现冲四/活四/活三致命威胁，必须果断出击或精确封堵！`
   },
   aggressive: {
     name: '狂暴猛攻',
@@ -163,7 +163,7 @@ export function categorizeTacticalMoves(board, myColor, checkBlackForbidden = tr
       { coord: 'G7', r: 8, c: 6, desc: '斜指起步，对角纵深展开，斜指开局之起点' },
       { coord: 'I8', r: 7, c: 8, desc: '横向直指，向右翼舒展' },
       { coord: 'G9', r: 6, c: 6, desc: '星角奇兵，突破传统中宫定式' },
-      { coord: 'D4', r: 11, c: 3, desc: '外围星位，天马行空布子' }
+      { coord: 'F6', r: 9, c: 5, desc: '外围大飞，拉开空间蓄势待发' }
     ];
     if (playstyle === 'openmind') {
       openings = shuffle(openings);
@@ -441,7 +441,7 @@ ${boardAscii}
 
 【落子决策要求】
 1. 观察上方 15x15 真实盘面，理解整体黑白势力分布与空旷区域。
-2. 结合你的【战略棋风偏好】权衡决策。除参考系统推演选项外，只要是盘面上未被占用的空位合法坐标，你都可以根据宏观大局自由决定；但若存在【🚨 紧急胜负手】（敌方活三/冲四），你必须优先封堵生死威胁！${urgentWarning}
+2. 结合你的【战略棋风偏好】权衡决策。优先从上方给出的【⚔️ 攻势】、【🛡️ 稳健防守】或【🌌 大局外势】中挑选最具策略价值的落子。除参考选项外，若自选坐标，必须与盘面已有棋子保持战术接触（相距不超过2格，严禁在脱离战场的空旷角落闲逛落子）；若存在【🚨 紧急胜负手】（敌方活三/冲四），你必须优先封堵生死威胁！${urgentWarning}
 3. 请同时输出一句符合你人设口吻的生动对弈交流（20~50字以内）。
 
 【输出格式约束】
@@ -959,6 +959,27 @@ async function callSingleLLM(config, board, myColor, promptPack, candidates, opt
           }
         }
 
+        // E. 拒斥脱离战场的荒漠“太空步”（防大模型误将五子棋当围棋占角）：
+        // 五子棋任何落子必须与已有棋子保持战术接触（切比雪夫距离 <= 2，即跳一步或相邻）。
+        // 若大模型在离主战场 >= 3 格的无人空旷角落落子（如 A14），自动拦截并校准！
+        const totalStones = countStones(board);
+        if (totalStones >= 2) {
+          const minDist = minDistanceToExistingStones(board, coord[0], coord[1]);
+          if (minDist > 2) {
+            const tacticalBest = (tactical?.flank && tactical.flank[0]) || (tactical?.attack && tactical.attack[0]) || fallbackMove;
+            return {
+              r: tacticalBest.r,
+              c: tacticalBest.c,
+              notation: tacticalBest.coord,
+              comment: (parsed.comment ? `${parsed.comment} ` : '') +
+                `（原选点 [${parsed.coord.toUpperCase()}] 距离主战场脱节 ${minDist} 格无战术联系，自动校准至有效要点 [${tacticalBest.coord}]）`,
+              isFallback: false,
+              elapsedMs,
+              reasoning
+            };
+          }
+        }
+
         return {
           r: coord[0],
           c: coord[1],
@@ -1303,6 +1324,26 @@ function countStones(board) {
     }
   }
   return total;
+}
+
+/**
+ * 计算落子点到盘面上任意已有棋子的最小切比雪夫距离 (Chebyshev distance)
+ * 0: 重合已有棋子，1: 紧挨相邻，2: 跳一步/大飞（有效战术策应），>=3: 与主战场脱节的荒漠废子
+ */
+export function minDistanceToExistingStones(board, r, c) {
+  let minDist = Infinity;
+  for (let br = 0; br < 15; br++) {
+    for (let bc = 0; bc < 15; bc++) {
+      if (board[br][bc] !== EMPTY) {
+        const dist = Math.max(Math.abs(br - r), Math.abs(bc - c));
+        if (dist < minDist) {
+          minDist = dist;
+          if (minDist <= 1) return minDist;
+        }
+      }
+    }
+  }
+  return minDist;
 }
 
 /**
