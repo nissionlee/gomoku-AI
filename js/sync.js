@@ -112,6 +112,7 @@ function toBool(value, fallback = false) {
 export function buildPayload(settings, updatedAt = Date.now()) {
   const src = settings && typeof settings === 'object' ? settings : {};
   const llm = src.llmConfig && typeof src.llmConfig === 'object' ? src.llmConfig : {};
+  const backup = src.backupLlmConfig && typeof src.backupLlmConfig === 'object' ? src.backupLlmConfig : {};
 
   const cleanSettings = {
     aiEngine: ENGINES.includes(src.aiEngine) ? src.aiEngine : 'local',
@@ -120,6 +121,7 @@ export function buildPayload(settings, updatedAt = Date.now()) {
     checkDoubleThree: toBool(src.checkDoubleThree, true),
     checkDoubleFour: toBool(src.checkDoubleFour, true),
     showForbiddenMarks: toBool(src.showForbiddenMarks, true),
+    showMoveNumbers: toBool(src.showMoveNumbers, true),
     soundEnabled: toBool(src.soundEnabled, true),
     llmConfig: {
       provider: PROVIDERS.includes(llm.provider) ? llm.provider : 'deepseek',
@@ -128,14 +130,16 @@ export function buildPayload(settings, updatedAt = Date.now()) {
       model: clampString(llm.model, 80),
       persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous',
       playstyle: PLAYSTYLES.includes(llm.playstyle) ? llm.playstyle : 'openmind',
-      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85,
-      timeoutSec: typeof llm.timeoutSec === 'number' ? Math.max(15, Math.min(600, llm.timeoutSec)) : 90,
-      failoverPolicy: ['auto_backup', 'ask_player', 'auto_local'].includes(llm.failoverPolicy) ? llm.failoverPolicy : 'auto_backup',
-      enableBackup: toBool(llm.enableBackup, false),
-      backupProvider: PROVIDERS.includes(llm.backupProvider) ? llm.backupProvider : 'deepseek',
-      backupBaseUrl: clampString(llm.backupBaseUrl, 200),
-      backupApiKey: clampString(llm.backupApiKey, 200),
-      backupModel: clampString(llm.backupModel, 80)
+      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85
+    },
+    backupLlmConfig: {
+      provider: PROVIDERS.includes(backup.provider) ? backup.provider : 'gemini',
+      baseUrl: clampString(backup.baseUrl, 200),
+      apiKey: clampString(backup.apiKey, 200),
+      model: clampString(backup.model, 80),
+      persona: PERSONAS.includes(backup.persona) ? backup.persona : 'humorous',
+      playstyle: PLAYSTYLES.includes(backup.playstyle) ? backup.playstyle : 'openmind',
+      temperature: typeof backup.temperature === 'number' ? Math.max(0.1, Math.min(1.2, backup.temperature)) : 0.85
     }
   };
 
@@ -163,6 +167,7 @@ export function parseRemotePayload(payload) {
   if (!s || typeof s !== 'object' || Array.isArray(s)) return { ok: false, error: '云端配置内容为空' };
 
   const llm = s.llmConfig && typeof s.llmConfig === 'object' ? s.llmConfig : {};
+  const backup = s.backupLlmConfig && typeof s.backupLlmConfig === 'object' ? s.backupLlmConfig : {};
   const settings = {
     aiEngine: ENGINES.includes(s.aiEngine) ? s.aiEngine : 'local',
     difficulty: DIFFICULTIES.includes(s.difficulty) ? s.difficulty : 'medium',
@@ -178,14 +183,16 @@ export function parseRemotePayload(payload) {
       model: clampString(llm.model, 80),
       persona: PERSONAS.includes(llm.persona) ? llm.persona : 'humorous',
       playstyle: PLAYSTYLES.includes(llm.playstyle) ? llm.playstyle : 'openmind',
-      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85,
-      timeoutSec: typeof llm.timeoutSec === 'number' ? Math.max(15, Math.min(600, llm.timeoutSec)) : 90,
-      failoverPolicy: ['auto_backup', 'ask_player', 'auto_local'].includes(llm.failoverPolicy) ? llm.failoverPolicy : 'auto_backup',
-      enableBackup: toBool(llm.enableBackup, false),
-      backupProvider: PROVIDERS.includes(llm.backupProvider) ? llm.backupProvider : 'deepseek',
-      backupBaseUrl: clampString(llm.backupBaseUrl, 200),
-      backupApiKey: clampString(llm.backupApiKey, 200),
-      backupModel: clampString(llm.backupModel, 80)
+      temperature: typeof llm.temperature === 'number' ? Math.max(0.1, Math.min(1.2, llm.temperature)) : 0.85
+    },
+    backupLlmConfig: {
+      provider: PROVIDERS.includes(backup.provider) ? backup.provider : 'gemini',
+      baseUrl: clampString(backup.baseUrl, 200),
+      apiKey: clampString(backup.apiKey, 200),
+      model: clampString(backup.model, 80),
+      persona: PERSONAS.includes(backup.persona) ? backup.persona : 'humorous',
+      playstyle: PLAYSTYLES.includes(backup.playstyle) ? backup.playstyle : 'openmind',
+      temperature: typeof backup.temperature === 'number' ? Math.max(0.1, Math.min(1.2, backup.temperature)) : 0.85
     }
   };
 
@@ -264,6 +271,10 @@ export function mergeSettings(local, incoming) {
     llmConfig: {
       ...(base.llmConfig || {}),
       ...(next.llmConfig || {})
+    },
+    backupLlmConfig: {
+      ...(base.backupLlmConfig || {}),
+      ...(next.backupLlmConfig || {})
     }
   };
 }

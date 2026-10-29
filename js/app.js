@@ -12,7 +12,7 @@ import {
   analyzePosition,
   formatAnalysisForLLM
 } from './analysis.js';
-import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS, AI_PLAYSTYLES } from './llm.js?v=2026.10.24-antispacemove-v2';
+import { getLLMMove, testLLMConnection, requestDeepAnalysis, renderBoardAscii, PROVIDER_PRESETS, AI_PERSONAS, AI_PLAYSTYLES } from './llm.js?v=2026.10.29-dual-llm-v1';
 import { searchPro, boardToFlat } from './engine-pro.js';
 import {
   generateSyncCode,
@@ -27,9 +27,9 @@ import {
   pullSettings,
   deleteSettings,
   mergeSettings
-} from './sync.js?v=2026.10.24-antispacemove-v2';
+} from './sync.js?v=2026.10.29-dual-llm-v1';
 import { sound } from './audio.js';
-import { StorageManager } from './storage.js?v=2026.10.24-antispacemove-v2';
+import { StorageManager } from './storage.js?v=2026.10.29-dual-llm-v1';
 import { Goban } from './board.js';
 import { api } from './api.js';
 
@@ -168,6 +168,23 @@ class GomokuApp {
     this.btnAnalyzeDeep = document.getElementById('btnAnalyzeDeep');
     this.analysisResult = document.getElementById('analysisResult');
 
+    // 棋谱轨迹与局势分析标签页
+    this.tabBtnReplay = document.getElementById('tabBtnReplay');
+    this.tabBtnAnalysis = document.getElementById('tabBtnAnalysis');
+    this.tabPaneReplay = document.getElementById('tabPaneReplay');
+    this.tabPaneAnalysis = document.getElementById('tabPaneAnalysis');
+
+    // 备用大模型配置元素
+    this.cfgBackupLlmProvider = document.getElementById('cfgBackupLlmProvider');
+    this.cfgBackupLlmBaseUrl = document.getElementById('cfgBackupLlmBaseUrl');
+    this.cfgBackupLlmApiKey = document.getElementById('cfgBackupLlmApiKey');
+    this.cfgBackupLlmModel = document.getElementById('cfgBackupLlmModel');
+    this.cfgBackupLlmPersona = document.getElementById('cfgBackupLlmPersona');
+    this.cfgBackupLlmPlaystyle = document.getElementById('cfgBackupLlmPlaystyle');
+    this.cfgBackupLlmTemperature = document.getElementById('cfgBackupLlmTemperature');
+    this.cfgBackupTempDisplay = document.getElementById('cfgBackupTempDisplay');
+    this.btnToggleBackupKeyVisibility = document.getElementById('btnToggleBackupKeyVisibility');
+
     // 跨设备配置同步（设置弹窗内）
     this.syncSection = document.getElementById('syncSection');
     this.syncCodeInput = document.getElementById('syncCodeInput');
@@ -209,7 +226,25 @@ class GomokuApp {
     this.btnLockApp = document.getElementById('btnLockApp');
   }
 
+  switchReplayAnalysisTab(tab) {
+    if (tab === 'analysis') {
+      if (this.tabBtnAnalysis) this.tabBtnAnalysis.classList.add('active');
+      if (this.tabBtnReplay) this.tabBtnReplay.classList.remove('active');
+      if (this.tabPaneAnalysis) this.tabPaneAnalysis.style.display = 'block';
+      if (this.tabPaneReplay) this.tabPaneReplay.style.display = 'none';
+    } else {
+      if (this.tabBtnReplay) this.tabBtnReplay.classList.add('active');
+      if (this.tabBtnAnalysis) this.tabBtnAnalysis.classList.remove('active');
+      if (this.tabPaneReplay) this.tabPaneReplay.style.display = 'block';
+      if (this.tabPaneAnalysis) this.tabPaneAnalysis.style.display = 'none';
+    }
+  }
+
   bindEvents() {
+    // 棋谱轨迹与局势分析标签页切换
+    this.tabBtnReplay?.addEventListener('click', () => this.switchReplayAnalysisTab('replay'));
+    this.tabBtnAnalysis?.addEventListener('click', () => this.switchReplayAnalysisTab('analysis'));
+
     // 密码认证体系
     this.initAuth();
 
@@ -343,19 +378,19 @@ class GomokuApp {
       /* 后端不可用时先不拦，登录那一刻再报错 */
     }
 
-    // 已有有效会话则直接进入
+    // 已有有效会话则识别用户
     try {
       const res = await api.me();
-      this.applyUser(res.user);
-      this.afterLogin();
-      return;
+      if (res && res.user) {
+        this.applyUser(res.user);
+      }
     } catch (e) {
-      /* 未登录 */
+      /* 未登录或单机使用，直接放行 */
     }
 
-    document.documentElement.classList.remove('app-unlocked');
-    if (this.authOverlay) this.authOverlay.style.display = 'flex';
-    if (this.goban) this.goban.setLocked(true);
+    // 单页面无跳转模式：直接放行进入棋盘，不弹登录遮罩
+    document.documentElement.classList.add('app-unlocked');
+    if (this.authOverlay) this.authOverlay.style.display = 'none';
   }
 
   applyUser(user) {
@@ -415,8 +450,7 @@ class GomokuApp {
   afterLogin() {
     document.documentElement.classList.add('app-unlocked');
     if (this.authOverlay) this.authOverlay.style.display = 'none';
-    if (this.goban) this.goban.setLocked(true);
-    this.showLobby();
+    this.enterAIMode();
   }
 
   async handleLogout() {
@@ -1327,9 +1361,9 @@ class GomokuApp {
           aiComment = '天元启手，先占中宫！';
         }
       } else if (this.settings.aiEngine === 'llm') {
-        // 大模型对弈：流式输出 + 自定义超时 + 备用大模型故障无缝自动接管
+        // 大模型对弈：流式输出 + 双超时，战术棋风与自主开局（打破千篇一律的固定走法）
         const candidates = getCandidateMoves(this.board, this.aiColor, 12, this.aiColor === BLACK && this.isForbiddenRuleOn());
-        const llmResult = await getLLMMove(
+        let llmResult = await getLLMMove(
           this.settings.llmConfig,
           this.board,
           this.aiColor,
@@ -1342,19 +1376,42 @@ class GomokuApp {
               if (this.gameStatus !== 'playing') return false;
               this.renderLLMProgress(progress);
               return true;
-            },
-            onRequestPlayerAction: async (info) => {
-              if (gen !== this.moveGen || this.gameStatus !== 'playing') return 'local';
-              return await this.promptLlmFailoverAction(info);
             }
           }
         );
+
+        // 主模型异常且配置了备用大模型时，自动无缝接力
+        const backupCfg = this.settings.backupLlmConfig;
+        const hasBackupKey = backupCfg && backupCfg.apiKey && backupCfg.apiKey.trim();
+        if (llmResult.isFallback && !llmResult.cancelled && hasBackupKey) {
+          const bModel = backupCfg.model || '备用模型';
+          this.showToast(`⚠️ 主模型未应答，正在无缝切换备用大模型（${bModel}）…`);
+          const backupResult = await getLLMMove(
+            backupCfg,
+            this.board,
+            this.aiColor,
+            this.moveHistory,
+            candidates,
+            {
+              onProgress: (progress) => {
+                if (gen !== this.moveGen) return false;
+                if (this.gameStatus !== 'playing') return false;
+                this.renderLLMProgress({ ...progress, label: `备用模型 ${bModel} 思考中` });
+                return true;
+              }
+            }
+          );
+          if (!backupResult.isFallback) {
+            llmResult = backupResult;
+            llmResult.usedBackup = true;
+          }
+        }
 
         chosenMove = { r: llmResult.r, c: llmResult.c, notation: llmResult.notation };
         aiComment = llmResult.comment;
 
         if (llmResult.usedBackup) {
-          this.showToast('🤖 主模型响应超时，已由备用大模型接力落子！');
+          this.showToast(`🛡️ 备用模型（${this.settings.backupLlmConfig?.model}）接手成功`);
         } else if (llmResult.isFallback && !llmResult.cancelled) {
           this.showToast(`⚠️ 大模型未正常应答：${llmResult.comment}`);
         } else if (llmResult.timedOut) {
@@ -3131,27 +3188,28 @@ class GomokuApp {
       if (tempDisplay) tempDisplay.textContent = Number(tempVal).toFixed(2);
     }
 
-    // 超时时间与容灾策略
-    const llmTimeout = document.getElementById('cfgLlmTimeout');
-    const llmFailoverPolicy = document.getElementById('cfgLlmFailoverPolicy');
-    if (llmTimeout) llmTimeout.value = String(this.settings.llmConfig.timeoutSec || 90);
-    if (llmFailoverPolicy) llmFailoverPolicy.value = this.settings.llmConfig.failoverPolicy || 'auto_backup';
+    // 备用大模型相关表单
+    const bProvider = document.getElementById('cfgBackupLlmProvider');
+    const bBaseUrl = document.getElementById('cfgBackupLlmBaseUrl');
+    const bApiKey = document.getElementById('cfgBackupLlmApiKey');
+    const bModel = document.getElementById('cfgBackupLlmModel');
+    const bPersona = document.getElementById('cfgBackupLlmPersona');
+    const bPlaystyle = document.getElementById('cfgBackupLlmPlaystyle');
+    const bTemperature = document.getElementById('cfgBackupLlmTemperature');
+    const bTempDisplay = document.getElementById('cfgBackupTempDisplay');
 
-    // 备用大模型配置表单
-    const enableBackup = document.getElementById('cfgLlmEnableBackup');
-    const backupFields = document.getElementById('backupLlmFields');
-    const backupProvider = document.getElementById('cfgLlmBackupProvider');
-    const backupBaseUrl = document.getElementById('cfgLlmBackupBaseUrl');
-    const backupApiKey = document.getElementById('cfgLlmBackupApiKey');
-    const backupModel = document.getElementById('cfgLlmBackupModel');
-
-    const isBackupEnabled = Boolean(this.settings.llmConfig.enableBackup);
-    if (enableBackup) enableBackup.checked = isBackupEnabled;
-    if (backupFields) backupFields.style.display = isBackupEnabled ? 'flex' : 'none';
-    if (backupProvider) backupProvider.value = this.settings.llmConfig.backupProvider || 'deepseek';
-    if (backupBaseUrl) backupBaseUrl.value = this.settings.llmConfig.backupBaseUrl || '';
-    if (backupApiKey) backupApiKey.value = this.settings.llmConfig.backupApiKey || '';
-    if (backupModel) backupModel.value = this.settings.llmConfig.backupModel || '';
+    const backupCfg = this.settings.backupLlmConfig || {};
+    if (bProvider) bProvider.value = backupCfg.provider || 'gemini';
+    if (bBaseUrl) bBaseUrl.value = backupCfg.baseUrl || '';
+    if (bApiKey) bApiKey.value = backupCfg.apiKey || '';
+    if (bModel) bModel.value = backupCfg.model || '';
+    if (bPersona) bPersona.value = backupCfg.persona || 'humorous';
+    if (bPlaystyle) bPlaystyle.value = backupCfg.playstyle || 'openmind';
+    if (bTemperature) {
+      const bTempVal = typeof backupCfg.temperature === 'number' ? backupCfg.temperature : 0.85;
+      bTemperature.value = bTempVal;
+      if (bTempDisplay) bTempDisplay.textContent = Number(bTempVal).toFixed(2);
+    }
 
     this.toggleLlmConfigSection(this.settings.aiEngine === 'llm');
   }
@@ -3164,10 +3222,11 @@ class GomokuApp {
   }
 
   /**
-   * 渲染模型体检报告（多行，按级别着色）
-   * @param {Array<{level:'ok'|'warn'|'fail'|'testing', text:string}>} lines
+   * 渲染主备双模型并发检测报告
+   * @param {Array<{level:'ok'|'warn'|'fail'|'testing', text:string}>} primaryLines
+   * @param {Array<{level:'ok'|'warn'|'fail'|'testing', text:string}>} backupLines
    */
-  renderTestResult(lines) {
+  renderDualTestResult(primaryLines, backupLines) {
     const el = document.getElementById('llmTestResult');
     if (!el) return;
 
@@ -3176,119 +3235,37 @@ class GomokuApp {
     ));
     const validLevels = ['ok', 'warn', 'fail', 'testing'];
 
-    el.innerHTML = (lines || []).map((line) => {
-      const level = validLevels.indexOf(line.level) !== -1 ? line.level : 'ok';
-      return '<div class="test-result-line">' +
-        `<span class="test-result-dot level-${level}"></span>` +
-        `<span class="test-result-text level-${level}">${esc(line.text)}</span>` +
-        '</div>';
-    }).join('');
+    const formatCol = (title, lines, isPrimary) => {
+      const badgeCls = isPrimary ? 'primary-title' : 'backup-title';
+      const colCls = isPrimary ? 'primary-col' : 'backup-col';
+      const linesHtml = (lines || []).map((line) => {
+        const level = validLevels.indexOf(line.level) !== -1 ? line.level : 'ok';
+        return '<div class="test-result-line">' +
+          `<span class="test-result-dot level-${level}"></span>` +
+          `<span class="test-result-text level-${level}">${esc(line.text)}</span>` +
+          '</div>';
+      }).join('');
+
+      return `<div class="dual-test-col ${colCls}">` +
+        `<div class="dual-test-head ${badgeCls}"><span>${title}</span></div>` +
+        linesHtml +
+        `</div>`;
+    };
+
+    const pModel = document.getElementById('cfgLlmModel')?.value || 'deepseek-chat';
+    const bModel = document.getElementById('cfgBackupLlmModel')?.value || 'gemini-1.5-flash';
+
+    el.innerHTML = '<div class="dual-test-container">' +
+      formatCol(`🔵 主大模型（${esc(pModel)}）`, primaryLines, true) +
+      formatCol(`🟣 备用大模型（${esc(bModel)}）`, backupLines, false) +
+      '</div>';
 
     el.classList.add('visible');
   }
 
-  /**
-   * 渲染备用模型体检报告
-   */
-  renderBackupTestResult(lines) {
-    const el = document.getElementById('llmBackupTestResult');
-    if (!el) return;
-
-    const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
-    ));
-    const validLevels = ['ok', 'warn', 'fail', 'testing'];
-
-    el.innerHTML = (lines || []).map((line) => {
-      const level = validLevels.indexOf(line.level) !== -1 ? line.level : 'ok';
-      return '<div class="test-result-line">' +
-        `<span class="test-result-dot level-${level}"></span>` +
-        `<span class="test-result-text level-${level}">${esc(line.text)}</span>` +
-        '</div>';
-    }).join('');
-
-    el.classList.add('visible');
-  }
-
-  /**
-   * 当大模型思考超时或 API 遇到异常时，向玩家弹出交互选项
-   * @param {Object} info { stage, primaryResult, backupResult, hasBackup, backupModel, failReason }
-   * @returns {Promise<'retry' | 'backup' | 'local'>}
-   */
-  promptLlmFailoverAction(info) {
-    return new Promise((resolve) => {
-      const modal = document.getElementById('llmTimeoutModal');
-      if (!modal) {
-        resolve('local');
-        return;
-      }
-
-      const titleEl = document.getElementById('llmTimeoutTitle');
-      const descEl = document.getElementById('llmTimeoutDesc');
-      const btnWaitMore = document.getElementById('btnTimeoutWaitMore');
-      const btnSwitchBackup = document.getElementById('btnTimeoutSwitchBackup');
-      const btnConfigureBackup = document.getElementById('btnTimeoutConfigureBackup');
-      const btnLocalFallback = document.getElementById('btnTimeoutLocalFallback');
-
-      const reason = info.failReason || '已超时无响应';
-      if (titleEl) {
-        titleEl.textContent = info.stage === 'all_failed'
-          ? '主备大模型均响应超时或异常'
-          : '大模型响应超时或网络波动';
-      }
-      if (descEl) {
-        descEl.textContent = `提示：${reason}。大模型可能正在进行深度复杂推理，或当前 API 处于排队高峰。请选择下一步处理方式：`;
-      }
-
-      if (btnSwitchBackup) {
-        if (info.hasBackup && info.backupModel) {
-          btnSwitchBackup.style.display = 'block';
-          btnSwitchBackup.textContent = `🔄 切换备用大模型 [${info.backupModel}] 落子`;
-        } else {
-          btnSwitchBackup.style.display = 'none';
-        }
-      }
-
-      if (btnConfigureBackup) {
-        btnConfigureBackup.style.display = (!info.hasBackup) ? 'block' : 'none';
-      }
-
-      let settled = false;
-      const cleanup = () => {
-        if (settled) return;
-        settled = true;
-        modal.classList.remove('active');
-        btnWaitMore?.removeEventListener('click', onWaitMore);
-        btnSwitchBackup?.removeEventListener('click', onSwitchBackup);
-        btnConfigureBackup?.removeEventListener('click', onConfigureBackup);
-        btnLocalFallback?.removeEventListener('click', onLocalFallback);
-      };
-
-      const onWaitMore = () => {
-        cleanup();
-        resolve('retry');
-      };
-      const onSwitchBackup = () => {
-        cleanup();
-        resolve('backup');
-      };
-      const onConfigureBackup = () => {
-        cleanup();
-        this.openSettingsModal();
-        resolve('local');
-      };
-      const onLocalFallback = () => {
-        cleanup();
-        resolve('local');
-      };
-
-      btnWaitMore?.addEventListener('click', onWaitMore);
-      btnSwitchBackup?.addEventListener('click', onSwitchBackup);
-      btnConfigureBackup?.addEventListener('click', onConfigureBackup);
-      btnLocalFallback?.addEventListener('click', onLocalFallback);
-
-      modal.classList.add('active');
-    });
+  renderTestResult(lines) {
+    // 兼容单通道调用，默认按主模型通道展示
+    this.renderDualTestResult(lines, [{ level: 'ok', text: '备用模型处于待机状态' }]);
   }
 
   initSettingsModalEvents() {
@@ -3299,7 +3276,7 @@ class GomokuApp {
       });
     });
 
-    // 模型服务商下拉选择联动
+    // 主模型服务商下拉选择联动
     const providerSelect = document.getElementById('cfgLlmProvider');
     providerSelect?.addEventListener('change', (e) => {
       const preset = PROVIDER_PRESETS[e.target.value];
@@ -3309,26 +3286,17 @@ class GomokuApp {
       }
     });
 
-    // 备用模型复选框切换显示
-    const enableBackupBox = document.getElementById('cfgLlmEnableBackup');
-    const backupFieldsBox = document.getElementById('backupLlmFields');
-    enableBackupBox?.addEventListener('change', (e) => {
-      if (backupFieldsBox) backupFieldsBox.style.display = e.target.checked ? 'flex' : 'none';
-    });
-
-    // 备用模型服务商选择联动
-    const backupProviderSelect = document.getElementById('cfgLlmBackupProvider');
+    // 备用模型服务商下拉选择联动
+    const backupProviderSelect = document.getElementById('cfgBackupLlmProvider');
     backupProviderSelect?.addEventListener('change', (e) => {
       const preset = PROVIDER_PRESETS[e.target.value];
       if (preset) {
-        const backupBaseUrl = document.getElementById('cfgLlmBackupBaseUrl');
-        const backupModel = document.getElementById('cfgLlmBackupModel');
-        if (backupBaseUrl && !backupBaseUrl.value) backupBaseUrl.value = preset.baseUrl;
-        if (backupModel && !backupModel.value) backupModel.value = preset.defaultModel;
+        document.getElementById('cfgBackupLlmBaseUrl').value = preset.baseUrl;
+        document.getElementById('cfgBackupLlmModel').value = preset.defaultModel;
       }
     });
 
-    // API Key 明文/密文切换
+    // 主模型 API Key 明文/密文切换
     const btnToggleKey = document.getElementById('btnToggleKeyVisibility');
     const inputKey = document.getElementById('cfgLlmApiKey');
     btnToggleKey?.addEventListener('click', () => {
@@ -3336,92 +3304,96 @@ class GomokuApp {
       btnToggleKey.textContent = inputKey.type === 'password' ? '👁️ 显示' : '🔒 隐藏';
     });
 
-    // 发散度/温度滑动条联动显示
+    // 备用模型 API Key 明文/密文切换
+    const btnToggleBackupKey = document.getElementById('btnToggleBackupKeyVisibility');
+    const inputBackupKey = document.getElementById('cfgBackupLlmApiKey');
+    btnToggleBackupKey?.addEventListener('click', () => {
+      inputBackupKey.type = inputBackupKey.type === 'password' ? 'text' : 'password';
+      btnToggleBackupKey.textContent = inputBackupKey.type === 'password' ? '👁️ 显示' : '🔒 隐藏';
+    });
+
+    // 主模型发散度/温度滑动条联动显示
     const inputTemp = document.getElementById('cfgLlmTemperature');
     const tempDisplay = document.getElementById('cfgTempDisplay');
     inputTemp?.addEventListener('input', (e) => {
       if (tempDisplay) tempDisplay.textContent = Number(e.target.value).toFixed(2);
     });
 
-    // 模型体检按键：连通握手 + 真实对弈负载实测
+    // 备用模型发散度/温度滑动条联动显示
+    const inputBackupTemp = document.getElementById('cfgBackupLlmTemperature');
+    const backupTempDisplay = document.getElementById('cfgBackupTempDisplay');
+    inputBackupTemp?.addEventListener('input', (e) => {
+      if (backupTempDisplay) backupTempDisplay.textContent = Number(e.target.value).toFixed(2);
+    });
+
+    // 双模型并发体检按键：主备两个大模型同时检测
     const btnTestLlm = document.getElementById('btnTestLlm');
     btnTestLlm?.addEventListener('click', async () => {
-      const config = {
+      const primaryConfig = {
         baseUrl: document.getElementById('cfgLlmBaseUrl').value,
         apiKey: document.getElementById('cfgLlmApiKey').value,
         model: document.getElementById('cfgLlmModel').value,
         persona: document.getElementById('cfgLlmPersona')?.value || 'humorous',
         playstyle: document.getElementById('cfgLlmPlaystyle')?.value || 'openmind',
-        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85'),
-        timeoutSec: parseInt(document.getElementById('cfgLlmTimeout')?.value || '90', 10)
+        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85')
+      };
+
+      const backupConfig = {
+        baseUrl: document.getElementById('cfgBackupLlmBaseUrl')?.value || '',
+        apiKey: document.getElementById('cfgBackupLlmApiKey')?.value || '',
+        model: document.getElementById('cfgBackupLlmModel')?.value || '',
+        persona: document.getElementById('cfgBackupLlmPersona')?.value || 'humorous',
+        playstyle: document.getElementById('cfgBackupLlmPlaystyle')?.value || 'openmind',
+        temperature: parseFloat(document.getElementById('cfgBackupLlmTemperature')?.value || '0.85')
       };
 
       btnTestLlm.disabled = true;
-      this.renderTestResult([{ level: 'testing', text: '阶段一：正在发起握手…' }]);
 
-      try {
-        const res = await testLLMConnection(config, {
+      let primaryLines = [{ level: 'testing', text: '阶段一：正在发起主大模型握手…' }];
+      let backupLines = [{ level: 'testing', text: '阶段一：正在发起备用大模型握手…' }];
+      this.renderDualTestResult(primaryLines, backupLines);
+
+      const runTest = async (cfg, isBackup) => {
+        if (!cfg.apiKey || !cfg.apiKey.trim()) {
+          return {
+            lines: [{
+              level: isBackup ? 'warn' : 'fail',
+              text: isBackup ? '未填写备用 API Key（若主模型故障将自动回退本地高强度算法）' : '尚未填写主大模型 API Key'
+            }]
+          };
+        }
+        return testLLMConnection(cfg, {
           board: this.board,
           onProgress: (p) => {
             const sec = Math.max(1, Math.round(p.elapsedMs / 1000));
-            const label = p.phase === 'reasoning' ? '模型正在推理' : '模型正在输出落子';
-            this.renderTestResult([{
+            const label = p.phase === 'reasoning' ? '正在推理' : '正在输出落子';
+            const activeLines = [{
               level: 'testing',
               text: `阶段二：${label}… 已等待 ${sec}s · 接收 ${p.chars} 字`
-            }]);
+            }];
+            if (isBackup) {
+              backupLines = activeLines;
+            } else {
+              primaryLines = activeLines;
+            }
+            this.renderDualTestResult(primaryLines, backupLines);
           }
         });
-        this.renderTestResult(res.lines);
-      } catch (err) {
-        this.renderTestResult([{ level: 'fail', text: `检测异常：${(err && err.message) || err}` }]);
-      } finally {
-        btnTestLlm.disabled = false;
-      }
-    });
-
-    // 备用模型连通性检测按键
-    const btnTestBackup = document.getElementById('btnTestBackupLlm');
-    btnTestBackup?.addEventListener('click', async () => {
-      const primaryBaseUrl = document.getElementById('cfgLlmBaseUrl')?.value || '';
-      const primaryApiKey = document.getElementById('cfgLlmApiKey')?.value || '';
-      const backupBaseUrl = document.getElementById('cfgLlmBackupBaseUrl')?.value || '';
-      const backupApiKey = document.getElementById('cfgLlmBackupApiKey')?.value || '';
-      const backupModel = document.getElementById('cfgLlmBackupModel')?.value || '';
-
-      const testConfig = {
-        baseUrl: backupBaseUrl.trim() || primaryBaseUrl.trim(),
-        apiKey: backupApiKey.trim() || primaryApiKey.trim(),
-        model: backupModel.trim(),
-        persona: document.getElementById('cfgLlmPersona')?.value || 'humorous',
-        playstyle: document.getElementById('cfgLlmPlaystyle')?.value || 'openmind',
-        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85'),
-        timeoutSec: parseInt(document.getElementById('cfgLlmTimeout')?.value || '90', 10)
       };
 
-      if (!testConfig.model) {
-        this.renderBackupTestResult([{ level: 'warn', text: '请先填写备用模型名称（如 deepseek-chat 或 gpt-4o-mini）' }]);
-        return;
-      }
-
-      btnTestBackup.disabled = true;
-      this.renderBackupTestResult([{ level: 'testing', text: '正在探测备用模型连通性…' }]);
-
       try {
-        const res = await testLLMConnection(testConfig, {
-          board: this.board,
-          onProgress: (p) => {
-            const sec = Math.max(1, Math.round(p.elapsedMs / 1000));
-            this.renderBackupTestResult([{
-              level: 'testing',
-              text: `备用模型正在运算… 已等待 ${sec}s · 接收 ${p.chars} 字`
-            }]);
-          }
-        });
-        this.renderBackupTestResult(res.lines);
+        const [primaryRes, backupRes] = await Promise.all([
+          runTest(primaryConfig, false),
+          runTest(backupConfig, true)
+        ]);
+        this.renderDualTestResult(primaryRes.lines, backupRes.lines);
       } catch (err) {
-        this.renderBackupTestResult([{ level: 'fail', text: `备用模型检测异常：${(err && err.message) || err}` }]);
+        this.renderDualTestResult(
+          [{ level: 'fail', text: `主模型检测异常：${(err && err.message) || err}` }],
+          [{ level: 'warn', text: '备用检测中止' }]
+        );
       } finally {
-        btnTestBackup.disabled = false;
+        btnTestLlm.disabled = false;
       }
     });
 
@@ -3447,7 +3419,7 @@ class GomokuApp {
       this.updateSideCard();
 
       this.settingsModal.classList.remove('active');
-      this.showToast('设置已保存');
+      this.showToast('设置已保存（包含主备双大模型）');
 
       if ((colorChanged || modeChanged) && confirm('对弈模式或执棋方已发生变动，是否立即重新开局？')) {
         this.requestNewGame();
@@ -3474,14 +3446,16 @@ class GomokuApp {
         model: document.getElementById('cfgLlmModel')?.value || '',
         persona: document.getElementById('cfgLlmPersona')?.value || 'humorous',
         playstyle: document.getElementById('cfgLlmPlaystyle')?.value || 'openmind',
-        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85'),
-        timeoutSec: parseInt(document.getElementById('cfgLlmTimeout')?.value || '90', 10),
-        failoverPolicy: document.getElementById('cfgLlmFailoverPolicy')?.value || 'auto_backup',
-        enableBackup: document.getElementById('cfgLlmEnableBackup')?.checked ?? false,
-        backupProvider: document.getElementById('cfgLlmBackupProvider')?.value || 'deepseek',
-        backupBaseUrl: document.getElementById('cfgLlmBackupBaseUrl')?.value || '',
-        backupApiKey: document.getElementById('cfgLlmBackupApiKey')?.value || '',
-        backupModel: document.getElementById('cfgLlmBackupModel')?.value || ''
+        temperature: parseFloat(document.getElementById('cfgLlmTemperature')?.value || '0.85')
+      },
+      backupLlmConfig: {
+        provider: document.getElementById('cfgBackupLlmProvider')?.value || 'gemini',
+        baseUrl: document.getElementById('cfgBackupLlmBaseUrl')?.value || '',
+        apiKey: document.getElementById('cfgBackupLlmApiKey')?.value || '',
+        model: document.getElementById('cfgBackupLlmModel')?.value || '',
+        persona: document.getElementById('cfgBackupLlmPersona')?.value || 'humorous',
+        playstyle: document.getElementById('cfgBackupLlmPlaystyle')?.value || 'openmind',
+        temperature: parseFloat(document.getElementById('cfgBackupLlmTemperature')?.value || '0.85')
       }
     };
   }
@@ -3727,9 +3701,12 @@ class GomokuApp {
 
   describeSettingsBrief(s) {
     const src = s || {};
-    const engine = src.aiEngine === 'llm'
-      ? `大模型 ${(src.llmConfig && src.llmConfig.model) || '未填模型'}`
+    let engine = src.aiEngine === 'llm'
+      ? `大模型 ${(src.llmConfig && src.llmConfig.model) || '未填主模型'}`
       : (src.aiEngine === 'pvp' ? '双人同屏' : '本地算法');
+    if (src.backupLlmConfig && src.backupLlmConfig.model) {
+      engine += ` (备用:${src.backupLlmConfig.model})`;
+    }
     const color = Number(src.playerColor) === 2 ? '执白后手' : '执黑先手';
     return `${engine} · ${this.getDifficultyLabel(src.difficulty)} · ${color}`;
   }

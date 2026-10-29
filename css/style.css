@@ -948,6 +948,137 @@ body.in-game .stats-banner {
 .test-result-text.level-fail { color: #ff7875; }
 .test-result-text.level-testing { color: #faad14; }
 
+/* 双大模型子卡片与实测展示 */
+.model-config-subcard {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+.primary-model-subcard {
+  border-left: 3px solid var(--accent-gold);
+}
+.backup-model-subcard {
+  border-left: 3px solid #9254de;
+  background: rgba(114, 46, 209, 0.05);
+}
+.subcard-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.subcard-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.subcard-badge.primary {
+  background: rgba(212, 136, 6, 0.2);
+  color: #ffc53d;
+  border: 1px solid rgba(212, 136, 6, 0.4);
+}
+.subcard-badge.backup {
+  background: rgba(114, 46, 209, 0.2);
+  color: #d3adf7;
+  border: 1px solid rgba(114, 46, 209, 0.4);
+}
+.subcard-title {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+@media (max-width: 640px) {
+  .form-row-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 双模型并发检测面板 */
+.dual-test-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 768px) {
+  .dual-test-container {
+    grid-template-columns: 1fr;
+  }
+}
+.dual-test-col {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+.dual-test-col.primary-col {
+  border-top: 2px solid var(--accent-gold);
+}
+.dual-test-col.backup-col {
+  border-top: 2px solid #9254de;
+}
+.dual-test-head {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.dual-test-head.primary-title { color: #ffc53d; }
+.dual-test-head.backup-title { color: #d3adf7; }
+
+/* 棋谱回放与局面分析一体化标签页 */
+.card-tabs-header {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-secondary);
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  border: 1px solid var(--border-subtle);
+}
+.card-tabs-header .tab-btn {
+  flex: 1;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+.card-tabs-header .tab-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+}
+.card-tabs-header .tab-btn.active {
+  background: var(--accent-gold);
+  color: #1a120b;
+  font-weight: 600;
+  box-shadow: 0 2px 6px rgba(212, 136, 6, 0.35);
+}
+.tab-content-pane {
+  display: none;
+}
+.tab-content-pane.active {
+  display: block;
+}
+
 /* 战绩面板网格 */
 .stats-grid {
   display: grid;

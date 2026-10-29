@@ -1088,14 +1088,17 @@ export async function getLLMMove(config, board, myColor, history, candidates, op
   }
 
   const policy = config.failoverPolicy || 'auto_backup';
-  const hasBackup = Boolean(config.enableBackup && (config.backupModel || '').trim());
-  const backupConfig = hasBackup ? {
-    ...config,
-    provider: config.backupProvider || config.provider,
-    baseUrl: (config.backupBaseUrl && config.backupBaseUrl.trim()) ? config.backupBaseUrl.trim() : config.baseUrl,
-    apiKey: (config.backupApiKey && config.backupApiKey.trim()) ? config.backupApiKey.trim() : config.apiKey,
-    model: config.backupModel.trim()
-  } : null;
+  let backupConfig = options.backupConfig || config.backupLlmConfig || null;
+  if (!backupConfig && config.enableBackup && (config.backupModel || '').trim()) {
+    backupConfig = {
+      ...config,
+      provider: config.backupProvider || config.provider,
+      baseUrl: (config.backupBaseUrl && config.backupBaseUrl.trim()) ? config.backupBaseUrl.trim() : config.baseUrl,
+      apiKey: (config.backupApiKey && config.backupApiKey.trim()) ? config.backupApiKey.trim() : config.apiKey,
+      model: config.backupModel.trim()
+    };
+  }
+  const hasBackup = Boolean(backupConfig && backupConfig.apiKey && backupConfig.apiKey.trim());
 
   const failReason = primaryResult.timedOut
     ? `超时（已等待 ${Math.round(primaryResult.elapsedMs / 1000)}s）`
