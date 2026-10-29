@@ -128,7 +128,23 @@ const server = http.createServer(async (req, res) => {
     return handleSyncRoute(req, res, code, req.method);
   }
 
-  // 健康检测
+  // 认证与健康检测 (本地免登录模式，直接放行)
+  if (url.pathname === '/api/auth/me') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({
+      ok: true,
+      user: { id: 'local_player', username: 'player', displayName: '棋友', role: 'user' }
+    }));
+    return;
+  }
+
+  if (url.pathname === '/api/auth/bootstrap') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({
+      ok: true,
+      needBootstrap: false
+    }));
+    return;
+  }
+
   if (url.pathname === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: true }));
     return;

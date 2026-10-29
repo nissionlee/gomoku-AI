@@ -388,7 +388,12 @@ class GomokuApp {
       /* 未登录或单机使用，直接放行 */
     }
 
-    // 单页面无跳转模式：直接放行进入棋盘，不弹登录遮罩
+    // 单页面无跳转模式：无论后端是否配置了会话，未登录一律直接给予默认本地用户，保证随时能下棋
+    if (!this.currentUser) {
+      this.applyUser({ id: 'local_player', username: 'player', displayName: '棋友', role: 'user' });
+    }
+
+    // 直接放行进入棋盘，不弹登录遮罩
     document.documentElement.classList.add('app-unlocked');
     if (this.authOverlay) this.authOverlay.style.display = 'none';
   }
@@ -1056,6 +1061,12 @@ class GomokuApp {
       btn.addEventListener('click', () => {
         this.selectedColor = Number(btn.dataset.color) === WHITE ? WHITE : BLACK;
         this.updateStartColorSelection();
+        // 选定执棋方后直接正式开始对局，避免多余二次确认
+        this.settings.playerColor = this.selectedColor;
+        this.persistSettings();
+        this.syncPlayerColorRadios();
+        this.startNewGame();
+        this.showToast(`⚔️ 对局开始，你${this.selectedColor === BLACK ? '执黑先行' : '执白后行'}`);
       });
     });
 
@@ -1228,7 +1239,9 @@ class GomokuApp {
    * 玩家点击棋盘
    */
   handlePlayerClick(r, c) {
-    if (!this.currentUser) return;
+    if (!this.currentUser) {
+      this.applyUser({ id: 'local_player', username: 'player', displayName: '棋友', role: 'user' });
+    }
     if (this.gameStatus !== 'playing') return;
     if (this.board[r][c] !== EMPTY) return;
 
@@ -3422,7 +3435,7 @@ class GomokuApp {
       this.showToast('设置已保存（包含主备双大模型）');
 
       if ((colorChanged || modeChanged) && confirm('对弈模式或执棋方已发生变动，是否立即重新开局？')) {
-        this.requestNewGame();
+        this.startNewGame();
       }
     });
   }
