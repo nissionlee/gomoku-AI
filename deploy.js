@@ -20,11 +20,21 @@ for (const item of PUBLISH_ITEMS) {
 
 console.log('→ 已就绪发布文件至临时目录：' + STAGE);
 
-const wranglerBin = 'C:/Users/nissi/AppData/Roaming/npm/node_modules/wrangler/bin/wrangler.js';
-const cmd = `node "${wranglerBin}" pages deploy "${STAGE}" --project-name=gomoku-ai --branch=main --commit-dirty=true`;
+// 查找 wrangler 可执行路径
+let wranglerCmd = 'npx --yes wrangler';
+const localWrangler = path.join(process.env.APPDATA || '', 'npm/node_modules/wrangler/bin/wrangler.js');
+if (fs.existsSync(localWrangler)) {
+  wranglerCmd = `node "${localWrangler}"`;
+}
 
-console.log('→ 执行部署命令...');
-execSync(cmd, { stdio: 'inherit' });
+const cmd = `${wranglerCmd} pages deploy "${STAGE}" --project-name=gomoku-ai --branch=main --commit-dirty=true`;
 
-fs.rmSync(STAGE, { recursive: true, force: true });
-console.log('✅ 发布完成，临时目录已清理！');
+console.log('→ 执行部署命令：' + cmd);
+try {
+  execSync(cmd, { stdio: 'inherit' });
+  console.log('✅ 发布完成！线上地址：https://gomoku-ai.pages.dev');
+} finally {
+  if (fs.existsSync(STAGE)) {
+    fs.rmSync(STAGE, { recursive: true, force: true });
+  }
+}
