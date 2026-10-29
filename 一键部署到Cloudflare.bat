@@ -1,50 +1,51 @@
 @echo off
 chcp 65001 >nul
-title 部署五子棋到 Cloudflare Pages
-
-echo ========================================================
-echo        弈境五子棋 · Cloudflare Pages 一键安全发布
-echo ========================================================
-echo.
+title Cloudflare Pages 发布五子棋
 
 cd /d "%~dp0"
 
 set "PATH=%APPDATA%\npm;C:\Users\nission\AppData\Local\Programs\WorkBuddyAI\resources\vendor\PortableGit\cmd;C:\Program Files\nodejs;%PATH%"
 
-echo [1/3] 检查 Cloudflare 授权状态...
-call wrangler.cmd whoami >nul 2>&1
-if %errorlevel% neq 0 (
-    echo.
-    echo ⚠️ 尚未登录 Cloudflare 账号或授权已过期。
-    echo 正在自动为您打开浏览器进行 Cloudflare 授权...
-    echo （请在弹出的浏览器页面中点击 "Allow / 允许授权"）
-    echo.
-    call wrangler.cmd login
-    if %errorlevel% neq 0 (
-        echo ❌ 授权未完成，请重试或检查网络连接。
-        pause
-        exit /b 1
-    )
-    echo ✅ 授权成功！
-    echo.
-) else (
-    echo ✅ Cloudflare 授权状态正常！
-    echo.
-)
+echo.
+echo ========================================================
+echo        弈境五子棋 Cloudflare Pages 安全发布
+echo ========================================================
+echo.
 
-echo [2/3] 准备发布包并上传至 Cloudflare Pages (gomoku-ai)...
+echo [1/3] 检查 Cloudflare 授权状态...
+call wrangler.cmd whoami 2>&1 | findstr "authenticated" >nul
+if not errorlevel 1 goto do_login
+goto do_deploy
+
+:do_login
+echo.
+echo [提示] 尚未登录 Cloudflare 或登录已过期。
+echo 正在为您打开浏览器授权页面，请在网页中点击 Allow 授权...
+echo.
+call wrangler.cmd login
+if errorlevel 1 (
+    echo [错误] 授权未完成，请重试。
+    pause
+    exit /b 1
+)
+echo [成功] Cloudflare 授权已完成！
+echo.
+
+:do_deploy
+echo [2/3] 准备发布并上传至 Cloudflare Pages: gomoku-ai...
 node deploy.js
-if %errorlevel% neq 0 (
-    echo ❌ 部署过程出现错误，请检查上方日志。
+if errorlevel 1 (
+    echo.
+    echo [错误] 发布未完成，请检查上方提示信息。
     pause
     exit /b 1
 )
 
 echo.
 echo ========================================================
-echo [3/3] 🚀 发布成功！
-echo 访问网址: https://gomoku-ai.pages.dev
-echo CF 控制台: https://dash.cloudflare.com/20ee6c4aae0fb0bf58206d8235b1da2e/pages/view/gomoku-ai
+echo [3/3] 发布成功！
+echo 线上网址: https://gomoku-ai.pages.dev
+echo 控制台:   https://dash.cloudflare.com/20ee6c4aae0fb0bf58206d8235b1da2e/pages/view/gomoku-ai
 echo ========================================================
 echo.
 pause
