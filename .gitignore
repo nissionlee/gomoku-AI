@@ -11,3 +11,8 @@ wzq-local/
 scratch/
 .box-agent/
 .box-agent-scratch/
+
+# 本地 Cloudflare API 密钥文件 (防泄露)
+.cloudflare_token
+.env
+.env.*
