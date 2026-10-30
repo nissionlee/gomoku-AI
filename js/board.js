@@ -271,7 +271,6 @@ export class Goban {
       return;
     }
 
-    if (this.isLocked) return;
     if (this.onCellClick) this.onCellClick(pos.r, pos.c);
   }
 

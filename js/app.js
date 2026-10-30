@@ -107,7 +107,7 @@ class GomokuApp {
   }
 
   /**
-   * 异步启动：自动同步（若已绑定同步码）→ 开第一局
+   * 异步启动：自动同步（若已绑定同步码）→ 就绪待机（等用户选好先后手后点击开始按键）
    */
   async bootApp() {
     try {
@@ -115,9 +115,7 @@ class GomokuApp {
     } catch (err) {
       console.warn('自动同步设置失败：', err);
     }
-    this.selectedColor = Number(this.settings.playerColor) === WHITE ? WHITE : BLACK;
-    this.updateStartColorSelection();
-    this.startNewGame();
+    this.prepareNewGame();
     if (this.pendingSyncToast) {
       this.showToast(this.pendingSyncToast);
       this.pendingSyncToast = '';
@@ -1066,6 +1064,9 @@ class GomokuApp {
         this.settings.playerColor = this.selectedColor;
         this.persistSettings();
         this.syncPlayerColorRadios();
+        if (this.gameStatus === 'idle') {
+          this.updateSideCard();
+        }
       });
     });
 
@@ -1104,7 +1105,46 @@ class GomokuApp {
   }
 
   /**
-   * 请求开始新对局：直接以当前选定的先后手开启，绝不弹出遮罩层（墨水屏无残影）
+   * 准备新对局：棋盘清空归位，处于待机状态，等用户选择先后手后点击「开始对局」按键
+   */
+  prepareNewGame() {
+    this.moveGen++; // 作废上一局残留的 AI 请求
+
+    this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
+    this.moveHistory = [];
+    this.winner = null;
+    this.winningLine = null;
+    this.gameStatus = 'idle';
+    this.turn = BLACK; // 默认黑先
+
+    // 复位回放视图与逐手分析缓存
+    this.resetReplayState();
+
+    // 复位计时器（显示 00:00，不计时）
+    this.resetTimer();
+
+    if (this.stepCountEl) {
+      this.stepCountEl.textContent = '0';
+    }
+    this.renderMoveList();
+    this.updateReplayUI();
+
+    // 回显配置中的执棋方
+    this.selectedColor = Number(this.settings.playerColor) === WHITE ? WHITE : BLACK;
+    this.updateStartColorSelection();
+
+    // 棋盘绘制空白并保持锁定（等待点击开始对局）
+    this.goban.setBoardState(this.board, null, null, [], [], []);
+    this.goban.setTurn(BLACK);
+    this.goban.setLocked(true);
+
+    // 重置侧边栏卡片与状态栏提示
+    this.updateSideCard();
+    this.updateStatus();
+  }
+
+  /**
+   * 请求开始新对局：复位棋盘并等待点击「开始对局」
    */
   requestNewGame() {
     if (this.isOnline()) {
@@ -1114,7 +1154,8 @@ class GomokuApp {
       return;
     }
 
-    this.startNewGame();
+    this.prepareNewGame();
+    this.showToast('棋盘已复位，请选定执棋方并点击「开始对局」');
   }
 
   /**
@@ -1145,7 +1186,9 @@ class GomokuApp {
       if (tagEl) tagEl.textContent = '同屏轮流博弈';
       if (avatarEl) avatarEl.textContent = '👥';
       if (playstylePill) playstylePill.style.display = 'none';
-      this.aiSpeechTextEl.textContent = '双人对弈已开启！黑方先行，双方轮流在同一屏幕落子，预祝棋逢对手！';
+      this.aiSpeechTextEl.textContent = this.gameStatus === 'idle'
+        ? '双人对弈准备中，请点击「开始对局」正式落子！'
+        : '双人对弈已开启！黑方先行，双方轮流在同一屏幕落子，预祝棋逢对手！';
     } else {
       const isLLM = this.settings.aiEngine === 'llm';
       const persona = AI_PERSONAS[this.settings.llmConfig.persona] || AI_PERSONAS.humorous;
@@ -1164,9 +1207,15 @@ class GomokuApp {
         }
       }
 
-      this.aiSpeechTextEl.textContent = isLLM
-        ? `【${persona.name} · ${playstyle.name}】棋局已开，请阁下落子！`
-        : '棋逢对手，请赐教！';
+      if (this.gameStatus === 'idle') {
+        this.aiSpeechTextEl.textContent = isLLM
+          ? `【${persona.name}】已就绪，请在上方选定先后手并点击「开始对局」！`
+          : '棋逢对手，请选择先后手后点击「开始对局」！';
+      } else {
+        this.aiSpeechTextEl.textContent = isLLM
+          ? `【${persona.name} · ${playstyle.name}】棋局已开，请阁下落子！`
+          : '棋逢对手，请赐教！';
+      }
     }
   }
 
@@ -1196,6 +1245,10 @@ class GomokuApp {
       this.aiColor = this.playerColor === BLACK ? WHITE : BLACK;
     }
 
+    if (this.stepCountEl) this.stepCountEl.textContent = '0';
+    this.renderMoveList();
+    this.updateReplayUI();
+
     // 重置计时器
     this.resetTimer();
     this.startTimer();
@@ -1222,6 +1275,11 @@ class GomokuApp {
     if (!this.currentUser) {
       this.applyUser({ id: 'local_player', username: 'player', displayName: '棋友', role: 'user' });
     }
+    if (this.gameStatus === 'idle') {
+      this.showToast('💡 请先点击右侧「开始对局」按键');
+      return;
+    }
+    if (this.goban.isLocked) return;
     if (this.gameStatus !== 'playing') return;
     if (this.board[r][c] !== EMPTY) return;
 
@@ -2976,6 +3034,14 @@ class GomokuApp {
         } else {
           this.statusTextEl.textContent = '平局！';
         }
+      }
+    } else if (this.gameStatus === 'idle') {
+      if (this.turnBadgeEl) {
+        this.turnBadgeEl.className = 'turn-badge';
+        this.turnBadgeEl.textContent = '未开始';
+      }
+      if (this.statusTextEl) {
+        this.statusTextEl.textContent = '请选择执棋方，点击「开始对局」按键开始对弈';
       }
     }
   }
