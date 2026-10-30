@@ -283,91 +283,79 @@ body.in-game .stats-banner {
   touch-action: pan-y;
 }
 
-/* ================= 3b. 开局面板（先手选择 + 正式开始） ================= */
-.start-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
+/* ================= 3b. 墨水屏专设 · 开局先后手控制卡（常驻页面、高对比、无阴影残影） ================= */
+.game-setup-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+}
+
+.game-setup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.game-setup-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.setup-color-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.inline-color-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.inline-color-group .start-color-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
-  border-radius: var(--radius-lg);
-  background: rgba(24, 20, 18, 0.78);
-  backdrop-filter: blur(7px);
-  -webkit-backdrop-filter: blur(7px);
-}
-
-.start-overlay[hidden] {
-  display: none;
-}
-
-.start-card {
-  width: 100%;
-  max-width: 360px;
-  max-height: 100%;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 22px 20px;
-  text-align: center;
-  background: var(--bg-card);
-  border: 1px solid var(--accent-gold);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7), 0 0 24px rgba(212, 136, 6, 0.15);
-  animation: auth-fadein 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.start-icon {
-  font-size: 2.2rem;
-  line-height: 1;
-  color: var(--accent-gold);
-}
-
-.start-title {
-  font-size: 1.2rem;
-  font-weight: 700;
-  color: #fff2db;
-}
-
-.start-desc {
-  font-size: 0.82rem;
-  line-height: 1.45;
-  color: var(--text-muted);
-}
-
-.start-color-group {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin: 2px 0;
-}
-
-.start-color-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 13px 8px;
+  gap: 8px;
+  padding: 10px 8px;
   font-family: inherit;
   color: var(--text-main);
   background: var(--bg-secondary);
   border: 2px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: none; /* 墨水屏避免中间过渡帧残影 */
 }
 
-.start-color-btn:hover {
-  background: var(--bg-card-hover);
+.inline-color-group .start-color-btn:hover {
   border-color: var(--accent-gold);
 }
 
-.start-color-btn.is-active {
-  background: rgba(212, 136, 6, 0.14);
+.inline-color-group .start-color-btn.is-active {
+  background: rgba(212, 136, 6, 0.18);
   border-color: var(--accent-gold);
-  box-shadow: 0 0 0 3px rgba(212, 136, 6, 0.16);
+  box-shadow: 0 0 0 2px var(--accent-gold);
+  font-weight: 700;
+}
+
+.inline-color-group .stone-dot {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.btn-start-game {
+  padding: 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
 }
 
 .stone-dot {

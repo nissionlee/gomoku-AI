@@ -115,7 +115,9 @@ class GomokuApp {
     } catch (err) {
       console.warn('自动同步设置失败：', err);
     }
-    this.requestNewGame();
+    this.selectedColor = Number(this.settings.playerColor) === WHITE ? WHITE : BLACK;
+    this.updateStartColorSelection();
+    this.startNewGame();
     if (this.pendingSyncToast) {
       this.showToast(this.pendingSyncToast);
       this.pendingSyncToast = '';
@@ -1061,17 +1063,14 @@ class GomokuApp {
       btn.addEventListener('click', () => {
         this.selectedColor = Number(btn.dataset.color) === WHITE ? WHITE : BLACK;
         this.updateStartColorSelection();
-        // 选定执棋方后直接正式开始对局，避免多余二次确认
         this.settings.playerColor = this.selectedColor;
         this.persistSettings();
         this.syncPlayerColorRadios();
-        this.startNewGame();
-        this.showToast(`⚔️ 对局开始，你${this.selectedColor === BLACK ? '执黑先行' : '执白后行'}`);
       });
     });
 
     this.btnStartGame?.addEventListener('click', () => {
-      // 把面板里的选择落到设置上，再正式开局
+      // 确认选定先后手并正式新开一局
       this.settings.playerColor = this.selectedColor;
       this.persistSettings();
       this.syncPlayerColorRadios();
@@ -1081,12 +1080,18 @@ class GomokuApp {
   }
 
   /**
-   * 同步开局面板里先手选择的高亮状态
+   * 同步开局面板里先手选择的高亮状态与描述文案
    */
   updateStartColorSelection() {
     this.startColorBtns.forEach((btn) => {
       btn.classList.toggle('is-active', Number(btn.dataset.color) === this.selectedColor);
     });
+    const desc = document.getElementById('setupColorDesc');
+    if (desc) {
+      desc.textContent = this.selectedColor === BLACK
+        ? '先手执黑 · 受禁手限制'
+        : '后手执白 · 无禁手限制 (AI先下)';
+    }
   }
 
   /**
@@ -1099,7 +1104,7 @@ class GomokuApp {
   }
 
   /**
-   * 请求开始新对局：先复位棋盘并亮出开局面板，等玩家选定先手再正式开始
+   * 请求开始新对局：直接以当前选定的先后手开启，绝不弹出遮罩层（墨水屏无残影）
    */
   requestNewGame() {
     if (this.isOnline()) {
@@ -1109,46 +1114,21 @@ class GomokuApp {
       return;
     }
 
-    if (!this.startOverlay) {
-      this.startNewGame(); // 极端情况下缺少面板，直接开局兜底
-      return;
-    }
-
-    // 复位棋盘与计时，清掉上一局残留
-    this.moveGen++; // 作废进行中的 AI 请求
-    this.board = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(EMPTY));
-    this.moveHistory = [];
-    this.winner = null;
-    this.winningLine = null;
-    this.turn = BLACK;
-    this.gameStatus = 'idle';
-    this.resetReplayState();
-    this.resetTimer();
-
-    // 回显上次的先手选择
-    this.selectedColor = Number(this.settings.playerColor) === WHITE ? WHITE : BLACK;
-    this.updateStartColorSelection();
-
-    this.goban.setBoardState(this.board, null, null, [], [], []);
-    this.goban.setTurn(BLACK);
-    this.goban.setLocked(true);
-    this.updateStatus();
-
-    this.startOverlay.hidden = false;
+    this.startNewGame();
   }
 
   /**
-   * 隐藏开局面板
+   * 隐藏开局面板（已重构为常驻页面无弹窗，保留空实现兼容旧逻辑）
    */
   hideStartOverlay() {
     if (this.startOverlay) this.startOverlay.hidden = true;
   }
 
   /**
-   * 开局面板是否正显示（未确认先手前棋盘应保持锁定）
+   * 开局面板是否正显示（当前已常驻页面无弹窗遮罩，恒返回 false）
    */
   isStartPanelOpen() {
-    return !!(this.startOverlay && !this.startOverlay.hidden);
+    return false;
   }
 
   /**

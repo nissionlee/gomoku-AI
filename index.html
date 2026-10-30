@@ -79,39 +79,36 @@
 
     <!-- 核心棋盘与操作区 -->
     <main class="main-layout">
-      <!-- 棋盘区域 -->
+      <!-- 棋盘区域（纯净棋盘，绝无弹窗遮罩，彻底杜绝墨水屏阴影残影） -->
       <section class="board-wrapper">
         <div class="goban-frame">
           <canvas id="boardCanvas"></canvas>
-
-          <!-- 开局面板：选择先手 → 正式开始 -->
-          <div class="start-overlay" id="startOverlay">
-            <div class="start-card">
-              <div class="start-icon">☯</div>
-              <h2 class="start-title">准备开局</h2>
-              <p class="start-desc">选择你的执棋方，点击「开始对局」正式落子</p>
-
-              <div class="start-color-group" id="startColorGroup">
-                <button type="button" class="start-color-btn is-active" data-color="1">
-                  <span class="stone-dot stone-dot-black"></span>
-                  <span class="start-color-name">执黑先行</span>
-                  <span class="start-color-hint">先手 · 受三三/四四禁手限制</span>
-                </button>
-                <button type="button" class="start-color-btn" data-color="2">
-                  <span class="stone-dot stone-dot-white"></span>
-                  <span class="start-color-name">执白后行</span>
-                  <span class="start-color-hint">后手 · 无禁手限制</span>
-                </button>
-              </div>
-
-              <button type="button" id="btnStartGame" class="btn btn-primary btn-block">▶ 开始对局</button>
-            </div>
-          </div>
         </div>
       </section>
 
       <!-- 侧边栏：对局控制面板 + AI 棋手卡片与对话 -->
       <aside class="side-panel">
+        <!-- 墨水屏常驻开局控制卡（直接置于页面上，无需弹窗） -->
+        <div class="panel-card game-setup-card" id="gameSetupCard">
+          <div class="game-setup-header">
+            <span class="game-setup-title">⚔️ 开局先后手</span>
+            <span id="setupColorDesc" class="setup-color-desc">先手执黑 · 受禁手限制</span>
+          </div>
+          <div class="start-color-group inline-color-group" id="startColorGroup">
+            <button type="button" class="start-color-btn is-active" data-color="1" title="执黑先行 (先手 · 受三三/四四禁手限制)">
+              <span class="stone-dot stone-dot-black"></span>
+              <span class="start-color-name">执黑先行</span>
+            </button>
+            <button type="button" class="start-color-btn" data-color="2" title="执白后行 (后手 · 无禁手限制)">
+              <span class="stone-dot stone-dot-white"></span>
+              <span class="start-color-name">执白后行</span>
+            </button>
+          </div>
+          <button type="button" id="btnStartGame" class="btn btn-primary btn-block btn-start-game" title="以当前选定先后手立即开始对局">
+            ▶ 开始对局
+          </button>
+        </div>
+
         <!-- 对局状态卡 -->
         <div class="board-status-bar">
           <div class="status-left">
